@@ -3,6 +3,8 @@
 package container
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,30 +14,59 @@ import (
 	"time"
 
 	"covet/internal/cgroups"
+	"covet/internal/meta"
+	"covet/internal/store"
 )
 
 const initEnv = "COVET_STAGE"
 const initStage = "init"
 const rootfsEnv = "COVET_ROOTFS"
 
-func Run(cfg Config) error {
+// Run 返回一个 Container 结构体，用来后续管理生命周期
+func Run(cfg Config) (meta.Container, error) {
 	if os.Getenv(initEnv) == initStage {
 		// 子进程任务
-		return runContainerInit(cfg.Command, os.Getenv(rootfsEnv))
+		return meta.Container{}, runContainerInit(cfg.Command, os.Getenv(rootfsEnv))
 	}
 
 	// 项目编译为二进制文件后可能会放在诸如 /usr/local/bin 这样的目录当中
 	// 所以要先获取获取可执行文件的绝对路径或者说名称
 	self, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolve current executable: %w", err)
+		return meta.Container{}, fmt.Errorf("resolve current executable: %w", err)
+	}
+
+	// 为当前这次容器运行创建一份最小元数据，后续 list/stop/rm/logs 都靠它
+	containerMeta := meta.Container{
+		ID:        newContainerID(),
+		Command:   append([]string(nil), cfg.Command...),
+		RootFS:    cfg.RootFS,
+		Status:    meta.StateRunning,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := os.MkdirAll(store.ContainerDir(containerMeta.ID), 0o755); err != nil {
+		return meta.Container{}, fmt.Errorf("create container dir: %w", err)
 	}
 
 	// 容器引擎作为父进程，在创建子进程前完成准备工作
 	cmd := exec.Command(self, append([]string{"run"}, cfg.Command...)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if cfg.Detach {
+		// -d 后台运行时把 stdout 和 stderr 都重定向到容器日志文件中
+		logFile, err := os.OpenFile(store.LogPath(containerMeta.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return meta.Container{}, fmt.Errorf("open container log file: %w", err)
+		}
+		defer logFile.Close()
+		cmd.Stdin = nil
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	} else {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
 	// 通过环境变量区分父子进程，子进程再次进入 container.Run() 时，
 	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
 	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+cfg.RootFS)
@@ -50,9 +81,16 @@ func Run(cfg Config) error {
 	}
 
 	// Start 方法和 Run 不同的地方在于：父进程创建子进程，但先不 wait
-	// 为什么要这么做？这样父进程能拿到 pid，把子进程放进 cgroup 后再等待退出，真正实现限制
+	// 为什么要这么做？这样父进程能拿到 pid，把子进程放进 cgroup、落盘元数据后再等待退出
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start container process: %w", err)
+		return meta.Container{}, fmt.Errorf("start container process: %w", err)
+	}
+
+	containerMeta.PID = cmd.Process.Pid
+	if err := store.SaveMetadata(containerMeta); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return meta.Container{}, err
 	}
 
 	var manager *cgroups.Manager
@@ -60,14 +98,29 @@ func Run(cfg Config) error {
 		manager = cgroups.NewManager(fmt.Sprintf("covet-%d", time.Now().UnixNano()))
 		if err := manager.Apply(cmd.Process.Pid, cfg.Resources); err != nil {
 			// 如果 cgroups 配置时出现错误，
-			_ = cmd.Process.Kill()    // 发送子进程 kill 信号，子进程变为 zombie
-			_, _ = cmd.Process.Wait() // 父进程 wait 等待 kernel 回收子进程
-			return err
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+			return meta.Container{}, err
 		}
 		defer manager.Destroy()
 	}
 
-	return cmd.Wait()
+	if cfg.Detach {
+		// 后台模式下父进程到这里就可以返回了，真正的容器进程继续在后台运行
+		return containerMeta, nil
+	}
+
+	waitErr := cmd.Wait()
+	// 前台模式下父进程会阻塞等待容器退出，并在退出后把状态更新为 stopped
+	containerMeta.Status = meta.StateStopped
+	if err := store.SaveMetadata(containerMeta); err != nil {
+		return meta.Container{}, err
+	}
+	if waitErr != nil {
+		return meta.Container{}, waitErr
+	}
+
+	return containerMeta, nil
 }
 
 func runContainerInit(command []string, rootfs string) error {
@@ -93,7 +146,7 @@ func runContainerInit(command []string, rootfs string) error {
 	}
 
 	// pid namespace 不会在容器中自动挂载 /proc
-	// 所以这里需要手动挂载，对于为文件系统，挂载源（比如这里的 "proc") 更多只用来占位
+	// 所以这里需要手动挂载，对于伪文件系统，挂载源（比如这里的 "proc"）更多只用来占位
 	if err := syscall.Mount("proc", "/proc", "proc", uintptr(0), ""); err != nil {
 		return fmt.Errorf("mount /proc: %w", err)
 	}
@@ -171,12 +224,14 @@ func resolveCommandPath(command, rootfs string) (string, error) {
 		return resolveCommandInRootFS("/", command, os.Getenv("PATH"))
 	}
 
-	// 注意，为什么有了 rootfs，还是和前面没有时的情况一样传根路径 '/'
-	// 其实就是容器进程的 '/' 不再是宿主机的，前面 setupRootFS 已经被替换过了～
-	path, err := resolveCommandInRootFS("/", command, os.Getenv("PATH"))
-	if err != nil {
-		return "", err
-	}
+	return resolveCommandInRootFS("/", command, os.Getenv("PATH"))
+}
 
-	return path, nil
+// 生成随机容器 ID
+func newContainerID() string {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("covet-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
 }

@@ -5,9 +5,11 @@ package container
 import (
 	"fmt"
 	"runtime"
+
+	"covet/internal/meta"
 )
 
-func Run(cfg Config) error {
+func Run(cfg Config) (meta.Container, error) {
 	_ = cfg
-	return fmt.Errorf("covet run requires Linux namespaces; current GOOS=%s", runtime.GOOS)
+	return meta.Container{}, fmt.Errorf("covet run requires Linux namespaces; current GOOS=%s", runtime.GOOS)
 }
