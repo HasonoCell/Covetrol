@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,11 +16,12 @@ import (
 
 const initEnv = "COVET_STAGE"
 const initStage = "init"
+const rootfsEnv = "COVET_ROOTFS"
 
-func Run(command []string, resources cgroups.ResourceConfig) error {
+func Run(cfg Config) error {
 	if os.Getenv(initEnv) == initStage {
 		// 子进程任务
-		return runContainerInit(command)
+		return runContainerInit(cfg.Command, os.Getenv(rootfsEnv))
 	}
 
 	// 项目编译为二进制文件后可能会放在诸如 /usr/local/bin 这样的目录当中
@@ -29,13 +32,13 @@ func Run(command []string, resources cgroups.ResourceConfig) error {
 	}
 
 	// 容器引擎作为父进程，在创建子进程前完成准备工作
-	cmd := exec.Command(self, append([]string{"run"}, command...)...)
+	cmd := exec.Command(self, append([]string{"run"}, cfg.Command...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	// 通过环境变量区分父子进程，子进程再次进入 container.Run() 时，
 	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
-	cmd.Env = append(os.Environ(), initEnv+"="+initStage)
+	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+cfg.RootFS)
 	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
@@ -53,9 +56,9 @@ func Run(command []string, resources cgroups.ResourceConfig) error {
 	}
 
 	var manager *cgroups.Manager
-	if resources.MemoryLimit != "" || resources.CPUWeight > 0 {
+	if cfg.Resources.MemoryLimit != "" || cfg.Resources.CPUWeight > 0 {
 		manager = cgroups.NewManager(fmt.Sprintf("covet-%d", time.Now().UnixNano()))
-		if err := manager.Apply(cmd.Process.Pid, resources); err != nil {
+		if err := manager.Apply(cmd.Process.Pid, cfg.Resources); err != nil {
 			// 如果 cgroups 配置时出现错误，
 			_ = cmd.Process.Kill()    // 发送子进程 kill 信号，子进程变为 zombie
 			_, _ = cmd.Process.Wait() // 父进程 wait 等待 kernel 回收子进程
@@ -67,27 +70,113 @@ func Run(command []string, resources cgroups.ResourceConfig) error {
 	return cmd.Wait()
 }
 
-func runContainerInit(command []string) error {
+func runContainerInit(command []string, rootfs string) error {
 	// 子进程即容器内进程。前面 namespace flags 创建好了 namespace
 	// 现在调用一系列 syscall 去初始化配置 namespace
 	if err := syscall.Sethostname([]byte("covet")); err != nil {
 		return fmt.Errorf("set hostname: %w", err)
 	}
 
+	// 关闭文件系统的共享机制
 	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("make mount propagation private: %w", err)
 	}
 
+	if rootfs != "" {
+		if err := setupRootFS(rootfs); err != nil {
+			return err
+		}
+	}
+
+	if err := os.MkdirAll("/proc", 0o555); err != nil {
+		return fmt.Errorf("ensure /proc exists: %w", err)
+	}
+
+	// pid namespace 不会在容器中自动挂载 /proc
+	// 所以这里需要手动挂载，对于为文件系统，挂载源（比如这里的 "proc") 更多只用来占位
 	if err := syscall.Mount("proc", "/proc", "proc", uintptr(0), ""); err != nil {
 		return fmt.Errorf("mount /proc: %w", err)
 	}
 	defer syscall.Unmount("/proc", 0)
 
-	path, err := exec.LookPath(command[0])
+	// 给 exec 找最终的程序路径
+	path, err := resolveCommandPath(command[0], rootfs)
 	if err != nil {
 		return fmt.Errorf("find command %q: %w", command[0], err)
 	}
 
 	// 通过 exec 将原本通过 go 代码创建的子进程彻底替换为目标进程
 	return syscall.Exec(path, command, os.Environ())
+}
+
+func setupRootFS(rootfs string) error {
+	absRootFS, err := filepath.Abs(rootfs)
+	if err != nil {
+		return fmt.Errorf("resolve rootfs path %q: %w", rootfs, err)
+	}
+
+	// pivot_root 要求新的根目录必须是一个挂载点，所以这里将普通目录变为一个挂载点（MS_BIND）
+	if err := syscall.Mount(absRootFS, absRootFS, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind mount rootfs %q: %w", absRootFS, err)
+	}
+
+	// 存放旧根目录
+	oldRoot := filepath.Join(absRootFS, ".pivot_root")
+	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
+		return fmt.Errorf("create old root dir %q: %w", oldRoot, err)
+	}
+
+	// 在容器中的 rootfs 下创建 /dev
+	if err := os.MkdirAll(filepath.Join(absRootFS, "dev"), 0o755); err != nil {
+		return fmt.Errorf("create /dev in rootfs %q: %w", absRootFS, err)
+	}
+
+	// 绑定挂载宿主机的 /dev 到容器 rootfs 的 /dev 中，确保容器至少有一个最小可用的 /dev
+	// 绑定挂载本质就是让 vfs 拦截对 target 的操作（读写），重定向到 source 中去
+	if err := syscall.Mount("/dev", filepath.Join(absRootFS, "dev"), "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind mount host /dev into rootfs %q: %w", absRootFS, err)
+	}
+
+	// 切换根目录
+	if err := syscall.PivotRoot(absRootFS, oldRoot); err != nil {
+		return fmt.Errorf("pivot root to %q: %w", absRootFS, err)
+	}
+
+	// 显式地切换当前程序的工作目录，确保指向新的根目录
+	if err := syscall.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir to new root: %w", err)
+	}
+
+	oldRoot = "/.pivot_root"
+	// 卸载旧根
+	if err := syscall.Unmount(oldRoot, syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("unmount old root %q: %w", oldRoot, err)
+	}
+
+	// 移除临时目录
+	if err := os.Remove(oldRoot); err != nil {
+		return fmt.Errorf("remove old root dir %q: %w", oldRoot, err)
+	}
+
+	return nil
+}
+
+// 子进程（即容器进程）执行命令前的最终解析 + 检验
+func resolveCommandPath(command, rootfs string) (string, error) {
+	if strings.Contains(command, "/") {
+		return command, nil
+	}
+
+	if rootfs == "" {
+		return resolveCommandInRootFS("/", command, os.Getenv("PATH"))
+	}
+
+	// 注意，为什么有了 rootfs，还是和前面没有时的情况一样传根路径 '/'
+	// 其实就是容器进程的 '/' 不再是宿主机的，前面 setupRootFS 已经被替换过了～
+	path, err := resolveCommandInRootFS("/", command, os.Getenv("PATH"))
+	if err != nil {
+		return "", err
+	}
+
+	return path, nil
 }

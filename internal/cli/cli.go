@@ -34,6 +34,7 @@ func run(args []string) error {
 	// 解析子命令参数
 	memLimit := flagset.String("mem", "", "memory limit, for example 256m")
 	cpuWeight := flagset.Int("cpu-weight", 0, "cgroup v2 cpu.weight value, 1-10000")
+	rootfs := flagset.String("rootfs", "", "container root filesystem path")
 
 	if err := flagset.Parse(args); err != nil {
 		return fmt.Errorf("parse run flags: %w", err)
@@ -58,16 +59,24 @@ func run(args []string) error {
 		return fmt.Errorf("--cpu-weight must be between 1 and 10000")
 	}
 
-	cfg := cgroups.ResourceConfig{
-		MemoryLimit: memoryLimit,
-		CPUWeight:   *cpuWeight,
+	cfg := container.Config{
+		Command: command,
+		RootFS:  *rootfs,
+		Resources: cgroups.ResourceConfig{
+			MemoryLimit: memoryLimit,
+			CPUWeight:   *cpuWeight,
+		},
 	}
 
-	return container.Run(command, cfg)
+	if err := container.ValidateConfig(cfg); err != nil {
+		return err
+	}
+
+	return container.Run(cfg)
 }
 
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] <command> [args...]\n\nstage 2 commands:\n  run     start a process in isolated namespaces and optionally attach cgroup v2 limits (linux only)"
+	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] <command> [args...]\n\ncurrent commands:\n  run     start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)"
 	if prefix == "" {
 		return errors.New(usage)
 	}
