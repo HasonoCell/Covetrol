@@ -28,6 +28,12 @@ func Run(args []string) error {
 		return list()
 	case "logs":
 		return logs(args[1:])
+	case "stop":
+		return stop(args[1:])
+	case "rm":
+		return remove(args[1:])
+	case "exec":
+		return exec(args[1:])
 	case "help", "-h", "--help":
 		return usageError("")
 	default:
@@ -131,8 +137,35 @@ func logs(args []string) error {
 	return err
 }
 
+func stop(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet stop <container-id>")
+	}
+
+	// 根据容器 ID 发送停止信号并更新元数据状态
+	return container.Stop(args[0])
+}
+
+func remove(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet rm <container-id>")
+	}
+
+	// 只允许删除已经停止的容器状态目录
+	return container.Remove(args[0])
+}
+
+func exec(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: covet exec <container-id> <command> [args...]")
+	}
+
+	// 进入目标容器进程的 namespace，再启动新的命令
+	return container.Exec(args[0], args[1:])
+}
+
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] [-d] <command> [args...]\n  covet list\n  covet logs <container-id>\n\ncurrent commands:\n  run      start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)\n  list     show persisted container metadata\n  logs     print the container log file"
+	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] [-d] <command> [args...]\n  covet list\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n\ncurrent commands:\n  run      start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)\n  list     show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container"
 	if prefix == "" {
 		return errors.New(usage)
 	}

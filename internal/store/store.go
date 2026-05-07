@@ -77,6 +77,13 @@ func ReadLog(id string) ([]byte, error) {
 	return data, nil
 }
 
+func RemoveContainer(id string) error {
+	if err := os.RemoveAll(ContainerDir(id)); err != nil {
+		return fmt.Errorf("remove container dir: %w", err)
+	}
+	return nil
+}
+
 // 打印元信息
 func ListMetadata() ([]meta.Container, error) {
 	entries, err := os.ReadDir(BaseDir())
