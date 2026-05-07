@@ -8,132 +8,81 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"covet/internal/cgroups"
-	"covet/internal/image"
 	"covet/internal/meta"
+	"covet/internal/rootfs"
 	"covet/internal/store"
 )
 
-const initEnv = "COVET_STAGE"
-const initStage = "init"
-const rootfsEnv = "COVET_ROOTFS"
-
 // Run 返回一个 Container 结构体，用来后续管理生命周期
-func Run(cfg Config) (meta.Container, error) {
+func Run(req RunRequest) (meta.Container, error) {
 	if os.Getenv(initEnv) == initStage {
-		// 子进程任务
-		return meta.Container{}, runContainerInit(cfg.Command, os.Getenv(rootfsEnv))
+		// 走子进程任务
+		return meta.Container{}, runContainerInit(req.Command, os.Getenv(rootfsEnv))
 	}
 
-	// 项目编译为二进制文件后可能会放在诸如 /usr/local/bin 这样的目录当中
-	// 所以要先获取获取可执行文件的绝对路径或者说名称
-	self, err := os.Executable()
-	if err != nil {
-		return meta.Container{}, fmt.Errorf("resolve current executable: %w", err)
+	// 父进程（容器引擎）任务，先组装上下文
+	ctx := RuntimeContext{
+		Request:     req,
+		ContainerID: newContainerID(),
 	}
+	containerMeta := newContainerMetadata(ctx)
 
-	// 为当前这次容器运行创建一份最小元数据，后续 list/stop/rm/logs 都靠它
-	containerMeta := meta.Container{
-		ID:        newContainerID(),
-		Command:   append([]string(nil), cfg.Command...),
-		Image:     cfg.Image,
-		Status:    meta.StateRunning,
-		CreatedAt: time.Now().UTC(),
-	}
-
-	if err := os.MkdirAll(store.ContainerDir(containerMeta.ID), 0o755); err != nil {
+	// 创建该容器对应的 metadata store dir
+	if err := os.MkdirAll(store.ContainerDir(ctx.ContainerID), 0o755); err != nil {
 		return meta.Container{}, fmt.Errorf("create container dir: %w", err)
 	}
-
-	// run 基于 image 启动，在容器目录下组装 overlay rootfs，
-	// 然后把 merged 路径交给后续已有的 pivot_root 链路
-	if cfg.Image != "" {
-		mergedRootFS, err := prepareOverlayRootFS(containerMeta.ID, cfg.Image)
-		if err != nil {
-			return meta.Container{}, err
-		}
-		cfg.MergedRootFS = mergedRootFS
-		containerMeta.RootFS = mergedRootFS
+	// 准备该容器的 rootfs
+	if err := prepareRuntimeRootFS(&ctx); err != nil {
+		return meta.Container{}, err
 	}
 
-	// 容器引擎作为父进程，在创建子进程前完成准备工作
-	childArgs := []string{"run"}
-	if cfg.Image != "" {
-		childArgs = append(childArgs, cfg.Image)
+	containerMeta.RootFS = ctx.MergedRootFS
+	// 构造创建子进程的命令
+	cmd, cleanupIO, err := newChildCommand(ctx)
+	if err != nil {
+		_ = rootfs.Cleanup(containerMeta)
+		return meta.Container{}, err
 	}
-	childArgs = append(childArgs, cfg.Command...)
-	cmd := exec.Command(self, childArgs...)
-	if cfg.Detach {
-		// -d 后台运行时把 stdout 和 stderr 都重定向到容器日志文件中
-		logFile, err := os.OpenFile(store.LogPath(containerMeta.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-		if err != nil {
-			return meta.Container{}, fmt.Errorf("open container log file: %w", err)
-		}
-		defer logFile.Close()
-		cmd.Stdin = nil
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-	} else {
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-
-	// 通过环境变量区分父子进程，子进程再次进入 Run() 时，
-	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
-	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+cfg.MergedRootFS)
-	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS |
-			syscall.CLONE_NEWIPC |
-			syscall.CLONE_NEWNET,
-		Unshareflags: syscall.CLONE_NEWNS,
-	}
+	defer cleanupIO()
 
 	// Start 方法和 Run 不同的地方在于：父进程创建子进程，但先不 wait
 	// 为什么要这么做？这样父进程能拿到 pid，把子进程放进 cgroup、落盘元数据后再等待退出
 	if err := cmd.Start(); err != nil {
-		_ = cleanupContainerRootFS(containerMeta)
+		_ = rootfs.Cleanup(containerMeta)
 		return meta.Container{}, fmt.Errorf("start container process: %w", err)
 	}
 
 	containerMeta.PID = cmd.Process.Pid
+	// 保存元信息
 	if err := store.SaveMetadata(containerMeta); err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
-		_ = cleanupContainerRootFS(containerMeta)
+		_ = rootfs.Cleanup(containerMeta)
 		return meta.Container{}, err
 	}
 
-	var manager *cgroups.Manager
-	if cfg.Resources.MemoryLimit != "" || cfg.Resources.CPUWeight > 0 {
-		manager = cgroups.NewManager(fmt.Sprintf("covet-%d", time.Now().UnixNano()))
-		if err := manager.Apply(cmd.Process.Pid, cfg.Resources); err != nil {
-			// 如果 cgroups 配置时出现错误，
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
-			_ = cleanupContainerRootFS(containerMeta)
-			return meta.Container{}, err
-		}
-		defer manager.Destroy()
+	// 应用 cgroups
+	cleanupResources, err := applyRuntimeResources(cmd.Process.Pid, req.Resources)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = rootfs.Cleanup(containerMeta)
+		return meta.Container{}, err
 	}
+	defer cleanupResources()
 
-	if cfg.Detach {
+	if req.Detach {
 		// 后台模式下父进程到这里就可以返回了，真正的容器进程继续在后台运行
 		return containerMeta, nil
 	}
 
 	waitErr := cmd.Wait()
-	// 前台模式下父进程会阻塞等待容器退出，并在退出后把状态更新为 stopped
 	containerMeta.Status = meta.StateStopped
-	if err := cleanupContainerRootFS(containerMeta); err != nil {
+	if err := rootfs.Cleanup(containerMeta); err != nil {
 		return meta.Container{}, err
 	}
 	if err := store.SaveMetadata(containerMeta); err != nil {
@@ -146,166 +95,103 @@ func Run(cfg Config) (meta.Container, error) {
 	return containerMeta, nil
 }
 
-func prepareOverlayRootFS(containerID, imageName string) (string, error) {
-	lowerDir := store.ContainerLowerDir(containerID)
-	upperDir := store.ContainerUpperDir(containerID)
-	workDir := store.ContainerWorkDir(containerID)
-	mergedDir := store.ContainerMergedDir(containerID)
-	overlayDirs := []string{lowerDir, upperDir, workDir, mergedDir}
-
-	// 先清理旧的 rootfs
-	if err := os.RemoveAll(store.ContainerRootFSDir(containerID)); err != nil {
-		return "", fmt.Errorf("reset container rootfs dir: %w", err)
+// 准备容器 rootfs
+func prepareRuntimeRootFS(ctx *RuntimeContext) error {
+	mergedRootFS, err := rootfs.PrepareOverlay(ctx.ContainerID, ctx.Request.Image)
+	if err != nil {
+		return err
 	}
-
-	// 准备好 overlay 所需要的四个 dirs
-	for _, dir := range overlayDirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", fmt.Errorf("create overlay dir %q: %w", dir, err)
-		}
-	}
-	// 提前在 upper 层里放好 .pivot_root，避免后面在 merged 里临时创建目录时触发只读限制
-	if err := os.MkdirAll(filepath.Join(upperDir, ".pivot_root"), 0o700); err != nil {
-		return "", fmt.Errorf("create overlay pivot_root dir: %w", err)
-	}
-
-	// lowerDir 作为容器的 rootfs 路径
-	if err := image.Import(imageName, lowerDir); err != nil {
-		return "", err
-	}
-
-	// 前面只创建了 dirs，这里正式以 overlay 的方式挂载
-	data := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
-	// merge 作为容器内进程的根挂载点
-	if err := syscall.Mount("overlay", mergedDir, "overlay", 0, data); err != nil {
-		return "", fmt.Errorf("mount overlay rootfs for image %q: %w", imageName, err)
-	}
-
-	return mergedDir, nil
+	ctx.MergedRootFS = mergedRootFS
+	return nil
 }
 
-func cleanupContainerRootFS(containerMeta meta.Container) error {
-	if containerMeta.Image == "" || containerMeta.RootFS == "" {
+// 准备好创建容器内子进程的命令，返回命令和该进程的 io 清理函数
+func newChildCommand(ctx RuntimeContext) (*exec.Cmd, func(), error) {
+	// 项目编译为二进制文件后可能会放在诸如 /usr/local/bin 这样的目录当中
+	// 所以要先获取获取可执行文件的绝对路径或者说名称
+	self, err := os.Executable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve current executable: %w", err)
+	}
+
+	childArgs := []string{"run", ctx.Request.Image}
+	childArgs = append(childArgs, ctx.Request.Command...)
+	cmd := exec.Command(self, childArgs...)
+	if err := configureProcessIO(cmd, ctx); err != nil {
+		return nil, nil, err
+	}
+	// 通过环境变量区分父子进程，子进程再次进入 Run() 时，
+	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
+	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+ctx.MergedRootFS)
+	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUTS |
+			syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWIPC |
+			syscall.CLONE_NEWNET,
+		Unshareflags: syscall.CLONE_NEWNS,
+	}
+
+	return cmd, func() {
+		closeProcessIO(cmd)
+	}, nil
+}
+
+// 设置容器进程的 IO
+func configureProcessIO(cmd *exec.Cmd, ctx RuntimeContext) error {
+	// 如果是 -d 后台模式运行，进程将信息输出到日志
+	if ctx.Request.Detach {
+		logFile, err := os.OpenFile(store.LogPath(ctx.ContainerID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			return fmt.Errorf("open container log file: %w", err)
+		}
+		cmd.Stdin = nil
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 		return nil
 	}
 
-	if err := syscall.Unmount(containerMeta.RootFS, syscall.MNT_DETACH); err != nil && err != syscall.EINVAL && err != syscall.ENOENT {
-		return fmt.Errorf("unmount container rootfs %q: %w", containerMeta.RootFS, err)
-	}
-
+	// 否则直接输出到 stdio
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return nil
 }
 
-func runContainerInit(command []string, rootfs string) error {
-	// 子进程即容器内进程。前面 namespace flags 创建好了 namespace
-	// 现在调用一系列 syscall 去初始化配置 namespace
-	if err := syscall.Sethostname([]byte("covet")); err != nil {
-		return fmt.Errorf("set hostname: %w", err)
-	}
-
-	// 关闭文件系统的共享机制
-	if err := syscall.Mount("", "/", "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("make mount propagation private: %w", err)
-	}
-
-	if rootfs != "" {
-		if err := setupRootFS(rootfs); err != nil {
-			return err
+// 关闭容器进程 IO
+func closeProcessIO(cmd *exec.Cmd) {
+	for _, stream := range []any{cmd.Stdout, cmd.Stderr} {
+		if file, ok := stream.(*os.File); ok && file != os.Stdout && file != os.Stderr {
+			_ = file.Close()
 		}
 	}
-
-	if err := os.MkdirAll("/proc", 0o555); err != nil {
-		return fmt.Errorf("ensure /proc exists: %w", err)
-	}
-
-	// pid namespace 不会在容器中自动挂载 /proc
-	// 所以这里需要手动挂载，对于伪文件系统，挂载源（比如这里的 "proc"）更多只用来占位
-	if err := syscall.Mount("proc", "/proc", "proc", uintptr(0), ""); err != nil {
-		return fmt.Errorf("mount /proc: %w", err)
-	}
-	defer syscall.Unmount("/proc", 0)
-
-	// 给 exec 找最终的程序路径
-	path, err := resolveCommandPath(command[0], rootfs)
-	if err != nil {
-		return fmt.Errorf("find command %q: %w", command[0], err)
-	}
-
-	// 通过 exec 将原本通过 go 代码创建的子进程彻底替换为目标进程
-	return syscall.Exec(path, command, os.Environ())
 }
 
-func setupRootFS(rootfs string) error {
-	absRootFS, err := filepath.Abs(rootfs)
-	if err != nil {
-		return fmt.Errorf("resolve rootfs path %q: %w", rootfs, err)
+// 应用资源控制组
+func applyRuntimeResources(pid int, resources cgroups.ResourceConfig) (func(), error) {
+	if resources.MemoryLimit == "" && resources.CPUWeight == 0 {
+		return func() {}, nil
 	}
 
-	// pivot_root 要求新的根目录必须是一个挂载点，所以这里将普通目录变为一个挂载点（MS_BIND）
-	if err := syscall.Mount(absRootFS, absRootFS, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("bind mount rootfs %q: %w", absRootFS, err)
+	manager := cgroups.NewManager(fmt.Sprintf("covet-%d", time.Now().UnixNano()))
+	if err := manager.Apply(pid, resources); err != nil {
+		return nil, err
 	}
-
-	// 存放旧根目录
-	oldRoot := filepath.Join(absRootFS, ".pivot_root")
-	if err := os.MkdirAll(oldRoot, 0o700); err != nil {
-		return fmt.Errorf("create old root dir %q: %w", oldRoot, err)
-	}
-
-	// 在容器中的 rootfs 下创建 /dev
-	if err := os.MkdirAll(filepath.Join(absRootFS, "dev"), 0o755); err != nil {
-		return fmt.Errorf("create /dev in rootfs %q: %w", absRootFS, err)
-	}
-
-	// 绑定挂载宿主机的 /dev 到容器 rootfs 的 /dev 中，确保容器至少有一个最小可用的 /dev
-	// 绑定挂载本质就是让 vfs 拦截对 target 的操作（读写），重定向到 source 中去
-	if err := syscall.Mount("/dev", filepath.Join(absRootFS, "dev"), "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("bind mount host /dev into rootfs %q: %w", absRootFS, err)
-	}
-
-	// 切换根目录
-	if err := syscall.PivotRoot(absRootFS, oldRoot); err != nil {
-		return fmt.Errorf("pivot root to %q: %w", absRootFS, err)
-	}
-
-	// 显式地切换当前程序的工作目录，确保指向新的根目录
-	if err := syscall.Chdir("/"); err != nil {
-		return fmt.Errorf("chdir to new root: %w", err)
-	}
-
-	oldRoot = "/.pivot_root"
-	// 卸载旧根
-	if err := syscall.Unmount(oldRoot, syscall.MNT_DETACH); err != nil {
-		return fmt.Errorf("unmount old root %q: %w", oldRoot, err)
-	}
-
-	// 移除临时目录
-	if err := os.Remove(oldRoot); err != nil && !os.IsPermission(err) && !isReadOnlyFS(err) {
-		return fmt.Errorf("remove old root dir %q: %w", oldRoot, err)
-	}
-
-	return nil
+	return func() {
+		_ = manager.Destroy()
+	}, nil
 }
 
-func isReadOnlyFS(err error) bool {
-	pathErr, ok := err.(*os.PathError)
-	if !ok {
-		return false
+// 生成容器元信息
+func newContainerMetadata(ctx RuntimeContext) meta.Container {
+	return meta.Container{
+		ID:        ctx.ContainerID,
+		Command:   append([]string(nil), ctx.Request.Command...),
+		Image:     ctx.Request.Image,
+		Status:    meta.StateRunning,
+		CreatedAt: time.Now().UTC(),
 	}
-	return pathErr.Err == syscall.EROFS
-}
-
-// 子进程（即容器进程）执行命令前的最终解析 + 检验
-func resolveCommandPath(command, rootfs string) (string, error) {
-	if strings.Contains(command, "/") {
-		return command, nil
-	}
-
-	if rootfs == "" {
-		return resolveCommandInRootFS("/", command, os.Getenv("PATH"))
-	}
-
-	return resolveCommandInRootFS("/", command, os.Getenv("PATH"))
 }
 
 // 生成随机容器 ID

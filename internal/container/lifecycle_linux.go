@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"covet/internal/meta"
+	"covet/internal/rootfs"
 	"covet/internal/store"
 )
 
@@ -35,7 +36,7 @@ func Stop(id string) error {
 	for time.Now().Before(deadline) {
 		if !isProcessRunning(containerMeta.PID) {
 			containerMeta.Status = meta.StateStopped
-			if err := cleanupContainerRootFS(containerMeta); err != nil {
+			if err := rootfs.Cleanup(containerMeta); err != nil {
 				return err
 			}
 			return store.SaveMetadata(containerMeta)
@@ -51,7 +52,7 @@ func Stop(id string) error {
 	for i := 0; i < 20; i++ {
 		if !isProcessRunning(containerMeta.PID) {
 			containerMeta.Status = meta.StateStopped
-			if err := cleanupContainerRootFS(containerMeta); err != nil {
+			if err := rootfs.Cleanup(containerMeta); err != nil {
 				return err
 			}
 			return store.SaveMetadata(containerMeta)

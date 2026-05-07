@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"covet/internal/meta"
+	"covet/internal/rootfs"
 	"covet/internal/store"
 )
 
@@ -88,7 +89,7 @@ func execInContainer(pid int, command []string) error {
 		return err
 	}
 
-	path, err := resolveCommandPath(command[0], "")
+	path, err := rootfs.ResolveCommandPath(command[0])
 	if err != nil {
 		return fmt.Errorf("find exec command %q: %w", command[0], err)
 	}

@@ -35,10 +35,10 @@ func Run(args []string) error {
 		return remove(args[1:])
 	case "exec":
 		return exec(args[1:])
-	case "commit":
-		return commit(args[1:])
-	case "import":
-		return _import(args[1:])
+	case "unpack":
+		return unpack(args[1:])
+	case "pack":
+		return pack(args[1:])
 	case "images":
 		return images()
 	case "help", "-h", "--help":
@@ -86,7 +86,7 @@ func run(args []string) error {
 		return fmt.Errorf("--cpu-weight must be between 1 and 10000")
 	}
 
-	cfg := container.Config{
+	req := container.RunRequest{
 		Command: command,
 		Image:   imageName,
 		Detach:  *detach,
@@ -96,17 +96,17 @@ func run(args []string) error {
 		},
 	}
 
-	if err := container.ValidateConfig(cfg); err != nil {
+	if err := container.ValidateRequest(req); err != nil {
 		return err
 	}
 
 	// run 真正返回后，如果是后台模式，就把容器 ID 打给用户，后续 list/stop/rm 都靠它
-	meta, err := container.Run(cfg)
+	meta, err := container.Run(req)
 	if err != nil {
 		return err
 	}
 
-	if cfg.Detach {
+	if req.Detach {
 		fmt.Println(meta.ID)
 	}
 
@@ -176,27 +176,27 @@ func exec(args []string) error {
 	return container.Exec(args[0], args[1:])
 }
 
-func commit(args []string) error {
+func pack(args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: covet commit <rootfs-path> <image-name>")
 	}
 
 	// 将一个 rootfs 目录打包为本地镜像仓库中的 tar 文件
-	return image.Commit(args[0], args[1])
+	return image.Pack(args[0], args[1])
 }
 
-func _import(args []string) error {
+func unpack(args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: covet import <image-name> <rootfs-path>")
 	}
 
 	// 从本地镜像 tar 恢复出一个新的 rootfs 目录
-	return image.Import(args[0], args[1])
+	return image.Unpack(args[0], args[1])
 }
 
 func images() error {
 	// 列出当前本地镜像仓库里已有的镜像名
-	imageNames, err := image.List()
+	imageNames, err := image.Images()
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,8 @@ import (
 	"covet/internal/store"
 )
 
-func Commit(rootfs, imageName string) error {
+// rootfs 打包为 image
+func Pack(rootfs, imageName string) error {
 	if imageName == "" {
 		return fmt.Errorf("image name is required")
 	}
@@ -110,7 +111,8 @@ func Commit(rootfs, imageName string) error {
 	})
 }
 
-func Import(imageName, rootfs string) error {
+// image 解包为 rootfs
+func Unpack(imageName, rootfs string) error {
 	if imageName == "" {
 		return fmt.Errorf("image name is required")
 	}
@@ -187,7 +189,7 @@ func Import(imageName, rootfs string) error {
 	}
 }
 
-func List() ([]string, error) {
+func Images() ([]string, error) {
 	entries, err := os.ReadDir(store.ImagesDir())
 	if err != nil {
 		if os.IsNotExist(err) {

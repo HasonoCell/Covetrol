@@ -9,7 +9,7 @@ import (
 	"covet/internal/meta"
 )
 
-func Run(cfg Config) (meta.Container, error) {
-	_ = cfg
+func Run(req RunRequest) (meta.Container, error) {
+	_ = req
 	return meta.Container{}, fmt.Errorf("covet run requires Linux namespaces; current GOOS=%s", runtime.GOOS)
 }
