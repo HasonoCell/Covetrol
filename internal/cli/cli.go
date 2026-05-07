@@ -25,8 +25,8 @@ func Run(args []string) error {
 	switch args[0] {
 	case "run":
 		return run(args[1:])
-	case "list", "ps":
-		return list()
+	case "ps":
+		return ps()
 	case "logs":
 		return logs(args[1:])
 	case "stop":
@@ -56,19 +56,23 @@ func run(args []string) error {
 	// 解析子命令参数
 	memLimit := flagset.String("mem", "", "memory limit, for example 256m")
 	cpuWeight := flagset.Int("cpu-weight", 0, "cgroup v2 cpu.weight value, 1-10000")
-	rootfs := flagset.String("rootfs", "", "container root filesystem path")
 	detach := flagset.Bool("d", false, "run container in background")
 
 	if err := flagset.Parse(args); err != nil {
 		return fmt.Errorf("parse run flags: %w", err)
 	}
 
-	// 解析子命令中的无名参数（即最终要在容器中启动的进程）
-	// 举个例子：covet run --mem 256m --cpu-weight 100 /bin/sh
-	// mem 和 cpu 都是子命令参数被 flagset 收集，最后剩下的 /bin/sh 就是最终命令
-	command := flagset.Args()
+	// run 的位置参数第一个是镜像名，后面的才是容器内要执行的命令
+	// 比如：covet run busybox-base /bin/sh
+	positional := flagset.Args()
+	if len(positional) == 0 {
+		return fmt.Errorf("run requires an image name, for example: covet run busybox-base /bin/sh")
+	}
+	imageName := positional[0]
+	command := positional[1:]
 	if len(command) == 0 {
-		return fmt.Errorf("run requires a command, for example: covet run /bin/sh")
+		// 目前还没有镜像元数据里的默认 CMD，所以先约定省略命令时默认进入 /bin/sh。
+		command = []string{"/bin/sh"}
 	}
 
 	// 将诸如 256m, 256mb 这样的 mem 参数转换为纯字节数的字符串格式
@@ -84,7 +88,7 @@ func run(args []string) error {
 
 	cfg := container.Config{
 		Command: command,
-		RootFS:  *rootfs,
+		Image:   imageName,
 		Detach:  *detach,
 		Resources: cgroups.ResourceConfig{
 			MemoryLimit: memoryLimit,
@@ -109,7 +113,7 @@ func run(args []string) error {
 	return nil
 }
 
-func list() error {
+func ps() error {
 	// 从本地状态目录里读取容器元数据并以表格形式输出
 	metas, err := store.ListMetadata()
 	if err != nil {
@@ -117,11 +121,12 @@ func list() error {
 	}
 
 	writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\tPID\tSTATUS\tCREATED\tCOMMAND")
+	fmt.Fprintln(writer, "ID\tPID\tIMAGE\tSTATUS\tCREATED\tCOMMAND")
 	for _, meta := range metas {
-		fmt.Fprintf(writer, "%s\t%d\t%s\t%s\t%s\n",
+		fmt.Fprintf(writer, "%s\t%d\t%s\t%s\t%s\t%s\n",
 			meta.ID,
 			meta.PID,
+			meta.Image,
 			meta.Status,
 			meta.CreatedAt.Format(time.RFC3339),
 			strings.Join(meta.Command, " "),
@@ -203,7 +208,7 @@ func images() error {
 }
 
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] [-d] <command> [args...]\n  covet list\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet commit <rootfs-path> <image-name>\n  covet import <image-name> <rootfs-path>\n  covet images\n\ncurrent commands:\n  run      start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)\n  list     show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  commit   pack a rootfs directory into a local image tar\n  import   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images"
+	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] [-d] <image-name> [command] [args...]\n  covet ps\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet commit <rootfs-path> <image-name>\n  covet import <image-name> <rootfs-path>\n  covet images\n\ncurrent commands:\n  run      start a process from a local image, then apply namespaces and optional cgroup v2 limits (linux only)\n  ps       show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  commit   pack a rootfs directory into a local image tar\n  import   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images"
 	if prefix == "" {
 		return errors.New(usage)
 	}

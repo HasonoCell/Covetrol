@@ -119,6 +119,7 @@ func Import(imageName, rootfs string) error {
 	}
 
 	imagePath := store.ImagePath(imageName)
+	// 打开镜像压缩包
 	file, err := os.Open(imagePath)
 	if err != nil {
 		return fmt.Errorf("open image tar %q: %w", imagePath, err)
@@ -133,6 +134,7 @@ func Import(imageName, rootfs string) error {
 		return fmt.Errorf("create target rootfs %q: %w", rootfs, err)
 	}
 
+	// 创建个 reader 准备从里面开读
 	reader := tar.NewReader(file)
 	for {
 		header, err := reader.Next()
@@ -143,6 +145,7 @@ func Import(imageName, rootfs string) error {
 			return fmt.Errorf("read tar entry: %w", err)
 		}
 
+		// 最终的解压缩路径基于目标容器的 rootfs 加上压缩包原本的文件路径拼接而成
 		targetPath := filepath.Join(rootfs, filepath.Clean(header.Name))
 		if err := ensureWithinRoot(rootfs, targetPath); err != nil {
 			return err

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"covet/internal/cgroups"
+	"covet/internal/image"
 	"covet/internal/meta"
 	"covet/internal/store"
 )
@@ -40,7 +41,7 @@ func Run(cfg Config) (meta.Container, error) {
 	containerMeta := meta.Container{
 		ID:        newContainerID(),
 		Command:   append([]string(nil), cfg.Command...),
-		RootFS:    cfg.RootFS,
+		Image:     cfg.Image,
 		Status:    meta.StateRunning,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -49,8 +50,24 @@ func Run(cfg Config) (meta.Container, error) {
 		return meta.Container{}, fmt.Errorf("create container dir: %w", err)
 	}
 
+	// run 基于 image 启动，在容器目录下组装 overlay rootfs，
+	// 然后把 merged 路径交给后续已有的 pivot_root 链路
+	if cfg.Image != "" {
+		mergedRootFS, err := prepareOverlayRootFS(containerMeta.ID, cfg.Image)
+		if err != nil {
+			return meta.Container{}, err
+		}
+		cfg.MergedRootFS = mergedRootFS
+		containerMeta.RootFS = mergedRootFS
+	}
+
 	// 容器引擎作为父进程，在创建子进程前完成准备工作
-	cmd := exec.Command(self, append([]string{"run"}, cfg.Command...)...)
+	childArgs := []string{"run"}
+	if cfg.Image != "" {
+		childArgs = append(childArgs, cfg.Image)
+	}
+	childArgs = append(childArgs, cfg.Command...)
+	cmd := exec.Command(self, childArgs...)
 	if cfg.Detach {
 		// -d 后台运行时把 stdout 和 stderr 都重定向到容器日志文件中
 		logFile, err := os.OpenFile(store.LogPath(containerMeta.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
@@ -67,9 +84,9 @@ func Run(cfg Config) (meta.Container, error) {
 		cmd.Stderr = os.Stderr
 	}
 
-	// 通过环境变量区分父子进程，子进程再次进入 container.Run() 时，
+	// 通过环境变量区分父子进程，子进程再次进入 Run() 时，
 	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
-	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+cfg.RootFS)
+	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+cfg.MergedRootFS)
 	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
@@ -83,6 +100,7 @@ func Run(cfg Config) (meta.Container, error) {
 	// Start 方法和 Run 不同的地方在于：父进程创建子进程，但先不 wait
 	// 为什么要这么做？这样父进程能拿到 pid，把子进程放进 cgroup、落盘元数据后再等待退出
 	if err := cmd.Start(); err != nil {
+		_ = cleanupContainerRootFS(containerMeta)
 		return meta.Container{}, fmt.Errorf("start container process: %w", err)
 	}
 
@@ -90,6 +108,7 @@ func Run(cfg Config) (meta.Container, error) {
 	if err := store.SaveMetadata(containerMeta); err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
+		_ = cleanupContainerRootFS(containerMeta)
 		return meta.Container{}, err
 	}
 
@@ -100,6 +119,7 @@ func Run(cfg Config) (meta.Container, error) {
 			// 如果 cgroups 配置时出现错误，
 			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
+			_ = cleanupContainerRootFS(containerMeta)
 			return meta.Container{}, err
 		}
 		defer manager.Destroy()
@@ -113,6 +133,9 @@ func Run(cfg Config) (meta.Container, error) {
 	waitErr := cmd.Wait()
 	// 前台模式下父进程会阻塞等待容器退出，并在退出后把状态更新为 stopped
 	containerMeta.Status = meta.StateStopped
+	if err := cleanupContainerRootFS(containerMeta); err != nil {
+		return meta.Container{}, err
+	}
 	if err := store.SaveMetadata(containerMeta); err != nil {
 		return meta.Container{}, err
 	}
@@ -121,6 +144,56 @@ func Run(cfg Config) (meta.Container, error) {
 	}
 
 	return containerMeta, nil
+}
+
+func prepareOverlayRootFS(containerID, imageName string) (string, error) {
+	lowerDir := store.ContainerLowerDir(containerID)
+	upperDir := store.ContainerUpperDir(containerID)
+	workDir := store.ContainerWorkDir(containerID)
+	mergedDir := store.ContainerMergedDir(containerID)
+	overlayDirs := []string{lowerDir, upperDir, workDir, mergedDir}
+
+	// 先清理旧的 rootfs
+	if err := os.RemoveAll(store.ContainerRootFSDir(containerID)); err != nil {
+		return "", fmt.Errorf("reset container rootfs dir: %w", err)
+	}
+
+	// 准备好 overlay 所需要的四个 dirs
+	for _, dir := range overlayDirs {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("create overlay dir %q: %w", dir, err)
+		}
+	}
+	// 提前在 upper 层里放好 .pivot_root，避免后面在 merged 里临时创建目录时触发只读限制
+	if err := os.MkdirAll(filepath.Join(upperDir, ".pivot_root"), 0o700); err != nil {
+		return "", fmt.Errorf("create overlay pivot_root dir: %w", err)
+	}
+
+	// lowerDir 作为容器的 rootfs 路径
+	if err := image.Import(imageName, lowerDir); err != nil {
+		return "", err
+	}
+
+	// 前面只创建了 dirs，这里正式以 overlay 的方式挂载
+	data := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
+	// merge 作为容器内进程的根挂载点
+	if err := syscall.Mount("overlay", mergedDir, "overlay", 0, data); err != nil {
+		return "", fmt.Errorf("mount overlay rootfs for image %q: %w", imageName, err)
+	}
+
+	return mergedDir, nil
+}
+
+func cleanupContainerRootFS(containerMeta meta.Container) error {
+	if containerMeta.Image == "" || containerMeta.RootFS == "" {
+		return nil
+	}
+
+	if err := syscall.Unmount(containerMeta.RootFS, syscall.MNT_DETACH); err != nil && err != syscall.EINVAL && err != syscall.ENOENT {
+		return fmt.Errorf("unmount container rootfs %q: %w", containerMeta.RootFS, err)
+	}
+
+	return nil
 }
 
 func runContainerInit(command []string, rootfs string) error {
@@ -207,11 +280,19 @@ func setupRootFS(rootfs string) error {
 	}
 
 	// 移除临时目录
-	if err := os.Remove(oldRoot); err != nil {
+	if err := os.Remove(oldRoot); err != nil && !os.IsPermission(err) && !isReadOnlyFS(err) {
 		return fmt.Errorf("remove old root dir %q: %w", oldRoot, err)
 	}
 
 	return nil
+}
+
+func isReadOnlyFS(err error) bool {
+	pathErr, ok := err.(*os.PathError)
+	if !ok {
+		return false
+	}
+	return pathErr.Err == syscall.EROFS
 }
 
 // 子进程（即容器进程）执行命令前的最终解析 + 检验

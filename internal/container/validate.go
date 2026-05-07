@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"covet/internal/store"
 )
 
 const defaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -14,22 +16,33 @@ func ValidateConfig(cfg Config) error {
 		return fmt.Errorf("container command is required")
 	}
 
+	if cfg.MergedRootFS != "" && cfg.Image != "" {
+		return fmt.Errorf("--rootfs and --image cannot be used together")
+	}
+
 	// 没传 rootfs 就不做其校验
-	if cfg.RootFS == "" {
+	if cfg.MergedRootFS == "" {
+		if cfg.Image == "" {
+			return nil
+		}
+
+		if _, err := os.Stat(store.ImagePath(cfg.Image)); err != nil {
+			return fmt.Errorf("stat image %q: %w", cfg.Image, err)
+		}
 		return nil
 	}
 
 	// 先检查 rootfs 是否存在
-	info, err := os.Stat(cfg.RootFS)
+	info, err := os.Stat(cfg.MergedRootFS)
 	if err != nil {
-		return fmt.Errorf("stat rootfs %q: %w", cfg.RootFS, err)
+		return fmt.Errorf("stat rootfs %q: %w", cfg.MergedRootFS, err)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("--rootfs must point to a directory")
 	}
 
 	// 在指定 rootfs 里解析命令路径，比如解析 /bin/sh
-	if _, err := resolveCommandInRootFS(cfg.RootFS, cfg.Command[0], os.Getenv("PATH")); err != nil {
+	if _, err := resolveCommandInRootFS(cfg.MergedRootFS, cfg.Command[0], os.Getenv("PATH")); err != nil {
 		return err
 	}
 

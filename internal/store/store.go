@@ -18,11 +18,17 @@ const (
 	logFileName      = "container.log"
 )
 
-// 返回整个元信息存储的路径
+// 返回整个容器元信息存储的路径
 func BaseDir() string {
 	return filepath.Join(".", stateDirName)
 }
 
+// 单个容器存储路径
+func ContainerDir(id string) string {
+	return filepath.Join(BaseDir(), id)
+}
+
+// 单个镜像存储路径
 func ImagesDir() string {
 	return filepath.Join(".", imageDirName)
 }
@@ -31,9 +37,24 @@ func ImagePath(name string) string {
 	return filepath.Join(ImagesDir(), name+".tar")
 }
 
-// 单个容器存储路径
-func ContainerDir(id string) string {
-	return filepath.Join(BaseDir(), id)
+func ContainerRootFSDir(id string) string {
+	return filepath.Join(ContainerDir(id), "rootfs")
+}
+
+func ContainerLowerDir(id string) string {
+	return filepath.Join(ContainerRootFSDir(id), "lower")
+}
+
+func ContainerUpperDir(id string) string {
+	return filepath.Join(ContainerRootFSDir(id), "upper")
+}
+
+func ContainerWorkDir(id string) string {
+	return filepath.Join(ContainerRootFSDir(id), "work")
+}
+
+func ContainerMergedDir(id string) string {
+	return filepath.Join(ContainerRootFSDir(id), "merged")
 }
 
 func MetadataPath(id string) string {
