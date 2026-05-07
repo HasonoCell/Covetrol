@@ -10,11 +10,13 @@ const (
 )
 
 type Container struct {
-	ID        string    `json:"id"`
-	PID       int       `json:"pid"`
-	Command   []string  `json:"command"`
-	Image     string    `json:"image,omitempty"`
-	RootFS    string    `json:"rootfs,omitempty"`
-	Status    State     `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	PID         int       `json:"pid"`
+	Command     []string  `json:"command"`
+	Image       string    `json:"image,omitempty"`
+	RootFS      string    `json:"rootfs,omitempty"`
+	MemoryLimit string    `json:"memory_limit,omitempty"`
+	CPUWeight   int       `json:"cpu_weight,omitempty"`
+	Status      State     `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
 }

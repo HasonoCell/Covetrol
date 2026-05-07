@@ -30,7 +30,11 @@ func Run(req RunRequest) (meta.Container, error) {
 		ContainerID: newContainerID(),
 	}
 	containerMeta := newContainerMetadata(ctx)
+	return startContainer(ctx, containerMeta)
+}
 
+// run 和 start 命令都可以复用此函数
+func startContainer(ctx RuntimeContext, containerMeta meta.Container) (meta.Container, error) {
 	// 创建该容器对应的 metadata store dir
 	if err := os.MkdirAll(store.ContainerDir(ctx.ContainerID), 0o755); err != nil {
 		return meta.Container{}, fmt.Errorf("create container dir: %w", err)
@@ -66,7 +70,7 @@ func Run(req RunRequest) (meta.Container, error) {
 	}
 
 	// 应用 cgroups
-	cleanupResources, err := applyRuntimeResources(cmd.Process.Pid, req.Resources)
+	cleanupResources, err := applyRuntimeResources(cmd.Process.Pid, ctx.Request.Resources)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
@@ -75,7 +79,7 @@ func Run(req RunRequest) (meta.Container, error) {
 	}
 	defer cleanupResources()
 
-	if req.Detach {
+	if ctx.Request.Detach {
 		// 后台模式下父进程到这里就可以返回了，真正的容器进程继续在后台运行
 		return containerMeta, nil
 	}
@@ -186,11 +190,13 @@ func applyRuntimeResources(pid int, resources cgroups.ResourceConfig) (func(), e
 // 生成容器元信息
 func newContainerMetadata(ctx RuntimeContext) meta.Container {
 	return meta.Container{
-		ID:        ctx.ContainerID,
-		Command:   append([]string(nil), ctx.Request.Command...),
-		Image:     ctx.Request.Image,
-		Status:    meta.StateRunning,
-		CreatedAt: time.Now().UTC(),
+		ID:          ctx.ContainerID,
+		Command:     append([]string(nil), ctx.Request.Command...),
+		Image:       ctx.Request.Image,
+		MemoryLimit: ctx.Request.Resources.MemoryLimit,
+		CPUWeight:   ctx.Request.Resources.CPUWeight,
+		Status:      meta.StateRunning,
+		CreatedAt:   time.Now().UTC(),
 	}
 }
 

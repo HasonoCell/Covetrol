@@ -26,7 +26,6 @@ func runContainerInit(command []string, mergedRootFS string) error {
 		return fmt.Errorf("make mount propagation private: %w", err)
 	}
 
-	
 	if mergedRootFS != "" {
 		if err := rootfs.Pivot(mergedRootFS); err != nil {
 			return err

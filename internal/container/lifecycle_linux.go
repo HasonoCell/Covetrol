@@ -8,10 +8,58 @@ import (
 	"syscall"
 	"time"
 
+	"covet/internal/cgroups"
 	"covet/internal/meta"
 	"covet/internal/rootfs"
 	"covet/internal/store"
 )
+
+func Start(id string) error {
+	// start 逻辑主要就是复用。先读容器元信息
+	containerMeta, err := store.LoadMetadata(id)
+	if err != nil {
+		return err
+	}
+
+	containerMeta, err = store.RefreshMetadata(containerMeta)
+	if err != nil {
+		return err
+	}
+	if containerMeta.Status == meta.StateRunning {
+		return nil
+	}
+	if containerMeta.Image == "" {
+		return fmt.Errorf("container %s has no image metadata to restart from", id)
+	}
+	if len(containerMeta.Command) == 0 {
+		return fmt.Errorf("container %s has no command metadata to restart from", id)
+	}
+
+	// 容器已经停了，但上一次运行留下的 overlay 挂载可能还在。
+	// start 之前先尽力清一遍，避免 PrepareOverlay 重新创建目录时撞上旧 mount。
+	if err := rootfs.Cleanup(containerMeta); err != nil {
+		return err
+	}
+
+	ctx := RuntimeContext{
+		Request: RunRequest{
+			Command: containerMeta.Command,
+			Image:   containerMeta.Image,
+			Detach:  true,
+			Resources: cgroups.ResourceConfig{
+				MemoryLimit: containerMeta.MemoryLimit,
+				CPUWeight:   containerMeta.CPUWeight,
+			},
+		},
+		ContainerID: containerMeta.ID,
+	}
+
+	containerMeta.PID = 0
+	containerMeta.Status = meta.StateRunning
+	containerMeta.RootFS = ""
+	_, err = startContainer(ctx, containerMeta)
+	return err
+}
 
 func Stop(id string) error {
 	containerMeta, err := store.LoadMetadata(id)
@@ -24,6 +72,11 @@ func Stop(id string) error {
 		return err
 	}
 	if containerMeta.Status == meta.StateStopped || containerMeta.PID <= 0 {
+		// 进程已经退出时，仍然要做一次 rootfs 清理。
+		// 这类情况通常出现在后台容器自行退出，但 overlay merged mount 还留在宿主机上。
+		if err := rootfs.Cleanup(containerMeta); err != nil {
+			return err
+		}
 		return nil
 	}
 

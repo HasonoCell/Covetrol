@@ -29,6 +29,8 @@ func Run(args []string) error {
 		return ps()
 	case "logs":
 		return logs(args[1:])
+	case "start":
+		return start(args[1:])
 	case "stop":
 		return stop(args[1:])
 	case "rm":
@@ -147,6 +149,15 @@ func logs(args []string) error {
 	}
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+func start(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet start <container-id>")
+	}
+
+	// 根据容器 ID 启动容器并更新元数据状态
+	return container.Start(args[0])
 }
 
 func stop(args []string) error {
