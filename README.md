@@ -37,11 +37,20 @@ sudo apt update
 sudo apt install -y busybox-static
 ```
 
+## 制作本地镜像
+
+先把准备好的 rootfs 打包进本地镜像仓库：
+
+```bash
+./covet pack /tmp/covet-rootfs busybox-base
+```
+
 ## 运行
 
 在 Linux 上以 root 身份运行：
 
 ```bash
-sudo ./covet run --rootfs /tmp/covet-rootfs /bin/sh
-sudo ./covet run --rootfs /tmp/covet-rootfs --mem 256m --cpu-weight 100 /bin/sh
+sudo ./covet run busybox-base /bin/sh
+sudo ./covet run --mem 256m --cpu-weight 100 busybox-base /bin/sh
+sudo ./covet run -v /tmp/data:/data:ro busybox-base /bin/sh
 ```

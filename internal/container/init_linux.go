@@ -3,18 +3,21 @@
 package container
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"syscall"
 
+	"covet/internal/mount"
 	"covet/internal/rootfs"
 )
 
 const initEnv = "COVET_STAGE"
 const initStage = "init"
 const rootfsEnv = "COVET_ROOTFS"
+const mountsEnv = "COVET_MOUNTS"
 
-func runContainerInit(command []string, mergedRootFS string) error {
+func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 	// 子进程即容器内进程。前面 namespace flags 创建好了 namespace
 	// 现在调用一系列 syscall 去初始化配置 namespace
 	if err := syscall.Sethostname([]byte("covet")); err != nil {
@@ -28,6 +31,18 @@ func runContainerInit(command []string, mergedRootFS string) error {
 
 	if mergedRootFS != "" {
 		if err := rootfs.Pivot(mergedRootFS); err != nil {
+			return err
+		}
+	}
+
+	// 子进程要在设置好新的根路径 / 后才开始绑定挂载
+	if mountsJSON != "" {
+		var mounts []mount.Mount
+		// 得到 mount 参数，开始 bind mount
+		if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
+			return fmt.Errorf("decode bind mounts: %w", err)
+		}
+		if err := mount.Apply(mounts); err != nil {
 			return err
 		}
 	}

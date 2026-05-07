@@ -5,6 +5,7 @@ package container
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"covet/internal/cgroups"
 	"covet/internal/meta"
+	"covet/internal/mount"
 	"covet/internal/rootfs"
 	"covet/internal/store"
 )
@@ -21,7 +23,7 @@ import (
 func Run(req RunRequest) (meta.Container, error) {
 	if os.Getenv(initEnv) == initStage {
 		// 走子进程任务
-		return meta.Container{}, runContainerInit(req.Command, os.Getenv(rootfsEnv))
+		return meta.Container{}, runContainerInit(req.Command, os.Getenv(rootfsEnv), os.Getenv(mountsEnv))
 	}
 
 	// 父进程（容器引擎）任务，先组装上下文
@@ -127,6 +129,14 @@ func newChildCommand(ctx RuntimeContext) (*exec.Cmd, func(), error) {
 	// 通过环境变量区分父子进程，子进程再次进入 Run() 时，
 	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
 	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+ctx.MergedRootFS)
+	if len(ctx.Request.Mounts) > 0 {
+		// 父进程将请求参数中的 mounts 序列化为 json 存在环境变量中，从而使子进程启动后可读
+		mountsJSON, err := json.Marshal(ctx.Request.Mounts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal bind mounts: %w", err)
+		}
+		cmd.Env = append(cmd.Env, mountsEnv+"="+string(mountsJSON))
+	}
 	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUTS |
@@ -193,11 +203,22 @@ func newContainerMetadata(ctx RuntimeContext) meta.Container {
 		ID:          ctx.ContainerID,
 		Command:     append([]string(nil), ctx.Request.Command...),
 		Image:       ctx.Request.Image,
+		Mounts:      toMetadataMounts(ctx.Request.Mounts),
 		MemoryLimit: ctx.Request.Resources.MemoryLimit,
 		CPUWeight:   ctx.Request.Resources.CPUWeight,
 		Status:      meta.StateRunning,
 		CreatedAt:   time.Now().UTC(),
 	}
+}
+
+// 创建一个 mount 信息副本到 metadata
+func toMetadataMounts(mounts []mount.Mount) []mount.Mount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	var cloned []mount.Mount
+	out := append(cloned, mounts...)
+	return out
 }
 
 // 生成随机容器 ID

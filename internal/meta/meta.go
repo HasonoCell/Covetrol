@@ -1,6 +1,10 @@
 package meta
 
-import "time"
+import (
+	"time"
+
+	"covet/internal/mount"
+)
 
 type State string
 
@@ -10,13 +14,14 @@ const (
 )
 
 type Container struct {
-	ID          string    `json:"id"`
-	PID         int       `json:"pid"`
-	Command     []string  `json:"command"`
-	Image       string    `json:"image,omitempty"`
-	RootFS      string    `json:"rootfs,omitempty"`
-	MemoryLimit string    `json:"memory_limit,omitempty"`
-	CPUWeight   int       `json:"cpu_weight,omitempty"`
-	Status      State     `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string        `json:"id"`
+	PID         int           `json:"pid"`
+	Command     []string      `json:"command"`
+	Image       string        `json:"image,omitempty"`
+	RootFS      string        `json:"rootfs,omitempty"`
+	Mounts      []mount.Mount `json:"mounts,omitempty"`
+	MemoryLimit string        `json:"memory_limit,omitempty"`
+	CPUWeight   int           `json:"cpu_weight,omitempty"`
+	Status      State         `json:"status"`
+	CreatedAt   time.Time     `json:"created_at"`
 }

@@ -1,12 +1,16 @@
 package container
 
-import "covet/internal/cgroups"
+import (
+	"covet/internal/cgroups"
+	"covet/internal/mount"
+)
 
 // RunRequest 只表示用户显式请求的运行参数
 type RunRequest struct {
 	Command   []string
 	Image     string
 	Detach    bool
+	Mounts    []mount.Mount
 	Resources cgroups.ResourceConfig
 }
 
