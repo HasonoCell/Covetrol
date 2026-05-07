@@ -12,6 +12,7 @@ import (
 
 	"covet/internal/cgroups"
 	"covet/internal/container"
+	"covet/internal/image"
 	"covet/internal/store"
 )
 
@@ -34,6 +35,12 @@ func Run(args []string) error {
 		return remove(args[1:])
 	case "exec":
 		return exec(args[1:])
+	case "commit":
+		return commit(args[1:])
+	case "import":
+		return _import(args[1:])
+	case "images":
+		return images()
 	case "help", "-h", "--help":
 		return usageError("")
 	default:
@@ -164,8 +171,39 @@ func exec(args []string) error {
 	return container.Exec(args[0], args[1:])
 }
 
+func commit(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: covet commit <rootfs-path> <image-name>")
+	}
+
+	// 将一个 rootfs 目录打包为本地镜像仓库中的 tar 文件
+	return image.Commit(args[0], args[1])
+}
+
+func _import(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: covet import <image-name> <rootfs-path>")
+	}
+
+	// 从本地镜像 tar 恢复出一个新的 rootfs 目录
+	return image.Import(args[0], args[1])
+}
+
+func images() error {
+	// 列出当前本地镜像仓库里已有的镜像名
+	imageNames, err := image.List()
+	if err != nil {
+		return err
+	}
+
+	for _, imageName := range imageNames {
+		fmt.Println(imageName)
+	}
+	return nil
+}
+
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] [-d] <command> [args...]\n  covet list\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n\ncurrent commands:\n  run      start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)\n  list     show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container"
+	usage := "usage:\n  covet run [--rootfs /path/to/rootfs] [--mem 256m] [--cpu-weight 100] [-d] <command> [args...]\n  covet list\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet commit <rootfs-path> <image-name>\n  covet import <image-name> <rootfs-path>\n  covet images\n\ncurrent commands:\n  run      start a process in isolated namespaces, optionally switch rootfs, and optionally attach cgroup v2 limits (linux only)\n  list     show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  commit   pack a rootfs directory into a local image tar\n  import   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images"
 	if prefix == "" {
 		return errors.New(usage)
 	}

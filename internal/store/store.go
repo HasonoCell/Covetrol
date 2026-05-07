@@ -13,6 +13,7 @@ import (
 
 const (
 	stateDirName     = ".covet/containers"
+	imageDirName     = ".covet/images"
 	metadataFileName = "metadata.json"
 	logFileName      = "container.log"
 )
@@ -20,6 +21,14 @@ const (
 // 返回整个元信息存储的路径
 func BaseDir() string {
 	return filepath.Join(".", stateDirName)
+}
+
+func ImagesDir() string {
+	return filepath.Join(".", imageDirName)
+}
+
+func ImagePath(name string) string {
+	return filepath.Join(ImagesDir(), name+".tar")
 }
 
 // 单个容器存储路径
