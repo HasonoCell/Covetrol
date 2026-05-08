@@ -6,26 +6,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
-// 遍历所有挂载项
-func Apply(mounts []Mount) error {
+// 遍历所有挂载项，将宿主机 source 挂到 rootfs 内部的 target
+func Apply(rootfs string, mounts []Mount) error {
 	for _, mount := range mounts {
-		if err := applyOne(mount); err != nil {
+		if err := applyOne(rootfs, mount); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func applyOne(m Mount) error {
-	// m.Target 这里注意是容器内路径，如 /tmp/data
-	target, err := safeTarget(m.Target)
+func applyOne(rootfs string, m Mount) error {
+	// target 这里注意是容器内路径，如 /tmp/data
+	// 需要将 target 转换为宿主机视角下 merged rootfs 内的真实路径
+	target, err := safeTarget(rootfs, m.Target)
 	if err != nil {
 		return err
 	}
-	if err := prepareTarget(target, m.SourceIsDir); err != nil {
+	upperTarget, err := resolveUpperTarget(rootfs, m.Target)
+	if err != nil {
+		return err
+	}
+	if err := prepareTarget(target, upperTarget); err != nil {
 		return err
 	}
 	// 绑定挂载
@@ -43,36 +49,41 @@ func applyOne(m Mount) error {
 }
 
 // 保证 target 路径是安全的（必须要是绝对路径，且防止路径逃逸）
-func safeTarget(target string) (string, error) {
+func safeTarget(rootfs, target string) (string, error) {
+	cleanRootFS := filepath.Clean(rootfs)
+	if !filepath.IsAbs(cleanRootFS) {
+		return "", fmt.Errorf("rootfs %q must be an absolute path", rootfs)
+	}
 	cleanTarget := filepath.Clean(target)
 	if !filepath.IsAbs(cleanTarget) {
 		return "", fmt.Errorf("mount target %q must be an absolute container path", target)
 	}
-	hostPath := filepath.Clean(filepath.Join("/", cleanTarget))
-	if hostPath != cleanTarget {
+	trimmedTarget := strings.TrimPrefix(cleanTarget, string(os.PathSeparator))
+	hostPath := filepath.Clean(filepath.Join(cleanRootFS, trimmedTarget))
+	rootPrefix := cleanRootFS + string(os.PathSeparator)
+	if hostPath != cleanRootFS && !strings.HasPrefix(hostPath, rootPrefix) {
 		return "", fmt.Errorf("mount target %q escapes container root", target)
 	}
 	return hostPath, nil
 }
 
-func prepareTarget(target string, isDir bool) error {
-	if isDir {
-		// 如果 source 是一个目录文件，那创建以 target 为路径的新目录
-		// 比如 /tmp/data:/data，那就先创建 /data
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return fmt.Errorf("create mount target dir %q: %w", target, err)
-		}
+func resolveUpperTarget(rootfs, target string) (string, error) {
+	cleanRootFS := filepath.Clean(rootfs)
+	if !filepath.IsAbs(cleanRootFS) {
+		return "", fmt.Errorf("rootfs %q must be an absolute path", rootfs)
+	}
+	upperRoot := filepath.Join(filepath.Dir(cleanRootFS), "upper")
+	cleanUpperRoot := filepath.Clean(upperRoot)
+	trimmedTarget := strings.TrimPrefix(filepath.Clean(target), string(os.PathSeparator))
+	return filepath.Join(cleanUpperRoot, trimmedTarget), nil
+}
+
+func prepareTarget(target, upperTarget string) error {
+	if _, err := os.Stat(target); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat mount target %q: %w", target, err)
 	}
 
-	// 如果 source 是一个普通文件，比如 /tmp/app.conf:/etc/app.conf
-	// 那也要保证容器内：1. 父目录 /etc 存在；2. app.conf 文件存在
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("create mount target parent for %q: %w", target, err)
-	}
-	file, err := os.OpenFile(target, os.O_CREATE, 0o644)
-	if err != nil {
-		return fmt.Errorf("create mount target file %q: %w", target, err)
-	}
-	return file.Close()
+	return fmt.Errorf("mount target %q is missing in merged rootfs after preparing upper target %q", target, upperTarget)
 }

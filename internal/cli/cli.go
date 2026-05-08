@@ -44,6 +44,10 @@ func Run(args []string) error {
 		return pack(args[1:])
 	case "images":
 		return images()
+	case "volumes":
+		return volumes()
+	case "volume":
+		return volume(args[1:])
 	case "help", "-h", "--help":
 		return usageError("")
 	default:
@@ -61,7 +65,7 @@ func run(args []string) error {
 	cpuWeight := flagset.Int("cpu-weight", 0, "cgroup v2 cpu.weight value, 1-10000")
 	detach := flagset.Bool("d", false, "run container in background")
 	var mounts mount.List
-	flagset.Var(&mounts, "v", "bind mount in the form /host:/container[:ro]")
+	flagset.Var(&mounts, "v", "mount in the form /host:/container[:ro] or volume:/container[:ro]")
 
 	// 将解析结果放在前面定义的变量中
 	if err := flagset.Parse(args); err != nil {
@@ -229,8 +233,87 @@ func images() error {
 	return nil
 }
 
+func volumes() error {
+	volumeNames, err := mount.ListVolumes()
+	if err != nil {
+		return err
+	}
+
+	for _, name := range volumeNames {
+		fmt.Println(name)
+	}
+	return nil
+}
+
+func volume(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: covet volume <inspect|rm> <name>")
+	}
+
+	switch args[0] {
+	case "inspect":
+		return volumeInspect(args[1:])
+	case "rm":
+		return volumeRemove(args[1:])
+	default:
+		return fmt.Errorf("unknown volume subcommand %q", args[0])
+	}
+}
+
+func volumeInspect(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet volume inspect <name>")
+	}
+
+	name := args[0]
+	info, err := mount.InspectVolume(name)
+	if err != nil {
+		return err
+	}
+	inUse, err := store.ContainersUsingVolume(name)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Name:\t%s\n", info.Name)
+	fmt.Printf("Path:\t%s\n", info.Path)
+	fmt.Printf("Exists:\t%t\n", info.Exists)
+	fmt.Printf("ReferencedBy:\t")
+	if len(inUse) == 0 {
+		fmt.Println("-")
+		return nil
+	}
+	containerIDs := make([]string, 0, len(inUse))
+	for _, containerMeta := range inUse {
+		containerIDs = append(containerIDs, containerMeta.ID)
+	}
+	fmt.Println(strings.Join(containerIDs, ", "))
+	return nil
+}
+
+func volumeRemove(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet volume rm <name>")
+	}
+
+	name := args[0]
+	inUse, err := store.ContainersUsingVolume(name)
+	if err != nil {
+		return err
+	}
+	if len(inUse) > 0 {
+		containerIDs := make([]string, 0, len(inUse))
+		for _, containerMeta := range inUse {
+			containerIDs = append(containerIDs, containerMeta.ID)
+		}
+		return fmt.Errorf("volume %q is still referenced by containers: %s", name, strings.Join(containerIDs, ", "))
+	}
+
+	return mount.RemoveVolume(name)
+}
+
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] [-d] [-v /host:/container[:ro]] <image-name> [command] [args...]\n  covet ps\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet commit <rootfs-path> <image-name>\n  covet import <image-name> <rootfs-path>\n  covet images\n\ncurrent commands:\n  run      start a process from a local image, then apply namespaces, bind mounts, and optional cgroup v2 limits (linux only)\n  ps       show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  commit   pack a rootfs directory into a local image tar\n  import   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images"
+	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] [-d] [-v /host:/container[:ro]] [-v volume:/container[:ro]] <image-name> [command] [args...]\n  covet ps\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet pack <rootfs-path> <image-name>\n  covet unpack <image-name> <rootfs-path>\n  covet images\n  covet volumes\n  covet volume inspect <name>\n  covet volume rm <name>\n\ncurrent commands:\n  run      start a process from a local image, then apply namespaces, mounts, and optional cgroup v2 limits (linux only)\n  ps       show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  pack     pack a rootfs directory into a local image tar\n  unpack   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images\n  volumes  list named volumes stored under .covet/volumes\n  volume   inspect or remove a named volume"
 	if prefix == "" {
 		return errors.New(usage)
 	}

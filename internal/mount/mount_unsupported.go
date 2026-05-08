@@ -7,7 +7,8 @@ import (
 	"runtime"
 )
 
-func Apply(mounts []Mount) error {
+func Apply(rootfs string, mounts []Mount) error {
+	_ = rootfs
 	if len(mounts) == 0 {
 		return nil
 	}

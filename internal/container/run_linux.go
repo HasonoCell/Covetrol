@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -103,11 +104,15 @@ func startContainer(ctx RuntimeContext, containerMeta meta.Container) (meta.Cont
 
 // 准备容器 rootfs
 func prepareRuntimeRootFS(ctx *RuntimeContext) error {
-	mergedRootFS, err := rootfs.PrepareOverlay(ctx.ContainerID, ctx.Request.Image)
+	mergedRootFS, err := rootfs.PrepareOverlay(ctx.ContainerID, ctx.Request.Image, ctx.Request.Mounts)
 	if err != nil {
 		return err
 	}
-	ctx.MergedRootFS = mergedRootFS
+	absMergedRootFS, err := filepath.Abs(mergedRootFS)
+	if err != nil {
+		return fmt.Errorf("resolve merged rootfs path %q: %w", mergedRootFS, err)
+	}
+	ctx.MergedRootFS = absMergedRootFS
 	return nil
 }
 

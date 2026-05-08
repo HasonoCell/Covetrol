@@ -53,4 +53,18 @@ sudo apt install -y busybox-static
 sudo ./covet run busybox-base /bin/sh
 sudo ./covet run --mem 256m --cpu-weight 100 busybox-base /bin/sh
 sudo ./covet run -v /tmp/data:/data:ro busybox-base /bin/sh
+sudo ./covet run -v mydata:/data busybox-base /bin/sh
+```
+
+说明：
+
+- `-v /host:/container[:ro]` 是 bind mount
+- `-v mydata:/container[:ro]` 是 named volume，数据保存在 `.covet/volumes/mydata`
+
+## Volume 管理
+
+```bash
+./covet volumes
+./covet volume inspect mydata
+./covet volume rm mydata
 ```

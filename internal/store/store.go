@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"covet/internal/meta"
+	"covet/internal/mount"
 )
 
 const (
@@ -171,4 +172,22 @@ func RefreshMetadata(containerMeta meta.Container) (meta.Container, error) {
 func isProcessRunning(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil
+}
+
+func ContainersUsingVolume(name string) ([]meta.Container, error) {
+	metas, err := ListMetadata()
+	if err != nil {
+		return nil, err
+	}
+
+	inUse := make([]meta.Container, 0)
+	for _, containerMeta := range metas {
+		for _, m := range containerMeta.Mounts {
+			if m.Type == mount.TypeVolume && m.Name == name {
+				inUse = append(inUse, containerMeta)
+				break
+			}
+		}
+	}
+	return inUse, nil
 }

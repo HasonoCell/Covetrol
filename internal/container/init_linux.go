@@ -29,20 +29,22 @@ func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 		return fmt.Errorf("make mount propagation private: %w", err)
 	}
 
-	if mergedRootFS != "" {
-		if err := rootfs.Pivot(mergedRootFS); err != nil {
+	// 为什么要先 mount，再去 pivot 替换容器根路径？
+	// mount 要求的 source 都应该是宿主机上的真实文件路径（不管是 /tmp/data 还是 /.../.covet/volumes/data）
+	// 如果 pivot 再去 mount，容器内进程的 / 已经变成了新的 rootfs 的根路径了，无法再看见原来的宿主机真实文件路径
+	// 也就是说，如果先 pivot 再 mount，即使能拿到正确的 target，但是已经丢失了原来的 source
+	if mountsJSON != "" {
+		var mounts []mount.Mount
+		if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
+			return fmt.Errorf("decode bind mounts: %w", err)
+		}
+		if err := mount.Apply(mergedRootFS, mounts); err != nil {
 			return err
 		}
 	}
 
-	// 子进程要在设置好新的根路径 / 后才开始绑定挂载
-	if mountsJSON != "" {
-		var mounts []mount.Mount
-		// 得到 mount 参数，开始 bind mount
-		if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
-			return fmt.Errorf("decode bind mounts: %w", err)
-		}
-		if err := mount.Apply(mounts); err != nil {
+	if mergedRootFS != "" {
+		if err := rootfs.Pivot(mergedRootFS); err != nil {
 			return err
 		}
 	}

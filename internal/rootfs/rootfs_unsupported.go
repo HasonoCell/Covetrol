@@ -7,11 +7,13 @@ import (
 	"runtime"
 
 	"covet/internal/meta"
+	"covet/internal/mount"
 )
 
-func PrepareOverlay(containerID, imageName string) (string, error) {
+func PrepareOverlay(containerID, imageName string, mounts []mount.Mount) (string, error) {
 	_ = containerID
 	_ = imageName
+	_ = mounts
 	return "", fmt.Errorf("rootfs overlay requires Linux; current GOOS=%s", runtime.GOOS)
 }
 

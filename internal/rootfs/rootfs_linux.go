@@ -11,12 +11,13 @@ import (
 
 	"covet/internal/image"
 	"covet/internal/meta"
+	"covet/internal/mount"
 	"covet/internal/store"
 )
 
 const defaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-func PrepareOverlay(containerID, imageName string) (string, error) {
+func PrepareOverlay(containerID, imageName string, mounts []mount.Mount) (string, error) {
 	lowerDir := store.ContainerLowerDir(containerID)
 	upperDir := store.ContainerUpperDir(containerID)
 	workDir := store.ContainerWorkDir(containerID)
@@ -39,6 +40,9 @@ func PrepareOverlay(containerID, imageName string) (string, error) {
 	if err := os.MkdirAll(filepath.Join(upperDir, ".pivot_root"), 0o700); err != nil {
 		return "", fmt.Errorf("create overlay pivot_root dir: %w", err)
 	}
+	if err := prepareMountTargets(upperDir, mounts); err != nil {
+		return "", err
+	}
 
 	// lowerDir 作为容器的 rootfs 路径
 	if err := image.Unpack(imageName, lowerDir); err != nil {
@@ -53,6 +57,32 @@ func PrepareOverlay(containerID, imageName string) (string, error) {
 	}
 
 	return mergedDir, nil
+}
+
+func prepareMountTargets(upperDir string, mounts []mount.Mount) error {
+	for _, m := range mounts {
+		trimmedTarget := strings.TrimPrefix(filepath.Clean(m.Target), string(os.PathSeparator))
+		targetPath := filepath.Join(upperDir, trimmedTarget)
+
+		if m.SourceIsDir {
+			if err := os.MkdirAll(targetPath, 0o755); err != nil {
+				return fmt.Errorf("prepare mount target dir %q in upper layer: %w", targetPath, err)
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return fmt.Errorf("prepare mount target parent for %q in upper layer: %w", targetPath, err)
+		}
+		file, err := os.OpenFile(targetPath, os.O_CREATE, 0o644)
+		if err != nil {
+			return fmt.Errorf("prepare mount target file %q in upper layer: %w", targetPath, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close prepared mount target file %q: %w", targetPath, err)
+		}
+	}
+	return nil
 }
 
 func Cleanup(containerMeta meta.Container) error {
