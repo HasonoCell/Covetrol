@@ -3,6 +3,7 @@ package container
 import (
 	"covet/internal/cgroups"
 	"covet/internal/mount"
+	"covet/internal/network"
 )
 
 // RunRequest 只表示用户显式请求的运行参数
@@ -19,4 +20,5 @@ type RuntimeContext struct {
 	Request      RunRequest
 	ContainerID  string
 	MergedRootFS string
+	Network      network.Config
 }

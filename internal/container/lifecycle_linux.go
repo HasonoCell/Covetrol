@@ -10,6 +10,7 @@ import (
 
 	"covet/internal/cgroups"
 	"covet/internal/meta"
+	"covet/internal/network"
 	"covet/internal/rootfs"
 	"covet/internal/store"
 )
@@ -52,6 +53,16 @@ func Start(id string) error {
 			},
 		},
 		ContainerID: containerMeta.ID,
+		Network: network.Config{
+			BridgeName:    containerMeta.Bridge,
+			BridgeIP:      "10.200.0.1",
+			BridgeCIDR:    "10.200.0.1/24",
+			ContainerIP:   containerMeta.IPAddress,
+			ContainerCIDR: containerMeta.IPAddress + "/24",
+			HostVethName:  containerMeta.HostVeth,
+			GuestVethName: containerMeta.GuestVeth,
+			PeerVethName:  containerMeta.PeerVeth,
+		},
 	}
 
 	containerMeta.PID = 0
@@ -77,6 +88,9 @@ func Stop(id string) error {
 		if err := rootfs.Cleanup(containerMeta); err != nil {
 			return err
 		}
+		if err := network.Teardown(network.Config{HostVethName: containerMeta.HostVeth}); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -90,6 +104,9 @@ func Stop(id string) error {
 		if !isProcessRunning(containerMeta.PID) {
 			containerMeta.Status = meta.StateStopped
 			if err := rootfs.Cleanup(containerMeta); err != nil {
+				return err
+			}
+			if err := network.Teardown(network.Config{HostVethName: containerMeta.HostVeth}); err != nil {
 				return err
 			}
 			return store.SaveMetadata(containerMeta)
@@ -106,6 +123,9 @@ func Stop(id string) error {
 		if !isProcessRunning(containerMeta.PID) {
 			containerMeta.Status = meta.StateStopped
 			if err := rootfs.Cleanup(containerMeta); err != nil {
+				return err
+			}
+			if err := network.Teardown(network.Config{HostVethName: containerMeta.HostVeth}); err != nil {
 				return err
 			}
 			return store.SaveMetadata(containerMeta)
@@ -128,6 +148,9 @@ func Remove(id string) error {
 	}
 	if containerMeta.Status == meta.StateRunning {
 		return fmt.Errorf("container %s is still running; stop it first", id)
+	}
+	if err := network.Teardown(network.Config{HostVethName: containerMeta.HostVeth}); err != nil {
+		return err
 	}
 
 	if err := store.RemoveContainer(id); err != nil {

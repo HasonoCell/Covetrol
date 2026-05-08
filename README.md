@@ -1,71 +1,52 @@
 # covet
 
-`covet` 是一个从零开始实现容器运行时的学习型项目。
+`covet` 是一个从零开始实现的学习型容器运行时项目，部分参考了《自己动手写 Docker 这本书》，提供了一个最小但完整的本地容器体验：可以基于本地镜像启动容器、限制资源、管理生命周期、挂载数据卷，并为容器提供独立网络和容器间通信能力。这个项目挺有意思的，了解了一些容器的底层实现知识～
+
+## 环境要求
+
+Linux，cgroup v2，以及一个可用的 `busybox` rootfs 或者你自己的 rootfs～
 
 ## 构建
 
 ```bash
-go build ./cmd/covet
+go build -o covet ./cmd/covet
 ```
 
-## 准备最小 busybox rootfs
+## 准备 rootfs
 
-在 Linux 上，可以使用辅助脚本准备一个最小 rootfs：
+提供了一个辅助脚本来帮助准备 rootfs：
 
 ```bash
 ./scripts/prepare_busybox_rootfs.sh /tmp/covet-rootfs
 ```
 
-这个脚本会做以下事情：
+这个脚本会：复制 busybox，创建 /bin/sh，准备最小目录结构，以及在需要时复制动态链接依赖。
 
-- 将 `busybox` 复制到 `bin/busybox`
-- 创建 `/bin/sh`，并让它链接到同目录下的 `busybox`
-- 创建当前运行时需要的最小目录结构（/etc, /dev, /sys 等文件夹）
-- 如果 `busybox` 是动态链接程序，则复制 `ldd` 输出的动态加载器和共享库
-- 创建最小的 `/etc/passwd` 和 `/etc/group`
-
-前置条件：
-
-- Linux
-- `busybox` 已在 `PATH` 中
-- `ldd` 已在 `PATH` 中
-
-如果你使用 Ubuntu，推荐安装静态版本：
+Ubuntu 上建议安装：
 
 ```bash
 sudo apt update
 sudo apt install -y busybox-static
 ```
 
-## 制作本地镜像
+## 命令参考
 
-先把准备好的 rootfs 打包进本地镜像仓库：
-
-```bash
-./covet pack /tmp/covet-rootfs busybox-base
-./covet image inspect busybox-base
-```
-
-## 运行
-
-在 Linux 上以 root 身份运行：
-
-```bash
-sudo ./covet run busybox-base /bin/sh
-sudo ./covet run --mem 256m --cpu-weight 100 busybox-base /bin/sh
-sudo ./covet run -v /tmp/data:/data:ro busybox-base /bin/sh
-sudo ./covet run -v mydata:/data busybox-base /bin/sh
-```
-
-说明：
-
-- `-v /host:/container[:ro]` 是 bind mount
-- `-v mydata:/container[:ro]` 是 named volume，数据保存在 `.covet/volumes/mydata`
-
-## Volume 管理
-
-```bash
-./covet volumes
-./covet volume inspect mydata
-./covet volume rm mydata
-```
+- 打包本地镜像：`./covet pack /tmp/covet-rootfs busybox`
+- 查看镜像列表：`./covet images`
+- 查看镜像详情：`./covet image inspect busybox`
+- 解包镜像：`./covet unpack busybox /tmp/unpacked-rootfs`
+- 启动前台容器：`sudo ./covet run busybox`
+- 启动后台容器：`sudo ./covet run -d busybox /bin/busybox sleep 600`
+- 指定资源限制：`sudo ./covet run --mem 256m --cpu-weight 100 busybox /bin/sh`
+- 查看容器列表：`./covet ps`
+- 查看容器日志：`./covet logs <container-id>`
+- 在容器内执行命令：`sudo ./covet exec <container-id> /bin/sh`
+- 停止容器：`sudo ./covet stop <container-id>`
+- 启动已存在容器：`sudo ./covet start <container-id>`
+- 删除容器：`sudo ./covet rm <container-id>`
+- bind mount：`sudo ./covet run -v /tmp/data:/data busybox /bin/sh`
+- named volume：`sudo ./covet run -v mydata:/data busybox /bin/sh`
+- 查看 volume 列表：`./covet volumes`
+- 查看 volume 详情：`./covet volume inspect mydata`
+- 删除 volume：`./covet volume rm mydata`
+- 网络 smoke test：`sudo ./scripts/smoke_test_network.sh ./covet busybox`

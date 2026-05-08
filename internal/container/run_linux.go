@@ -7,15 +7,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	"covet/internal/cgroups"
 	"covet/internal/meta"
 	"covet/internal/mount"
+	"covet/internal/network"
 	"covet/internal/rootfs"
 	"covet/internal/store"
 )
@@ -46,10 +49,14 @@ func startContainer(ctx RuntimeContext, containerMeta meta.Container) (meta.Cont
 	if err := prepareRuntimeRootFS(&ctx); err != nil {
 		return meta.Container{}, err
 	}
+	// 准备该容器的 network
+	if err := prepareRuntimeNetwork(&ctx); err != nil {
+		return meta.Container{}, err
+	}
 
 	containerMeta.RootFS = ctx.MergedRootFS
 	// 构造创建子进程的命令
-	cmd, cleanupIO, err := newChildCommand(ctx)
+	cmd, runtimeSync, cleanupIO, err := newChildCommand(ctx)
 	if err != nil {
 		_ = rootfs.Cleanup(containerMeta)
 		return meta.Container{}, err
@@ -64,10 +71,28 @@ func startContainer(ctx RuntimeContext, containerMeta meta.Container) (meta.Cont
 	}
 
 	containerMeta.PID = cmd.Process.Pid
+
+	// 需要目标进程 pid 才能把 peer 已经那个进程的 net namespace
+	if err := setupRuntimeNetwork(&ctx, &containerMeta, cmd.Process.Pid); err != nil {
+		_ = runtimeSync.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = rootfs.Cleanup(containerMeta)
+		return meta.Container{}, err
+	}
+	// 父进程 setup host network 成功后发信号给子进程
+	if err := signalRuntimeReady(runtimeSync); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = network.Teardown(ctx.Network)
+		_ = rootfs.Cleanup(containerMeta)
+		return meta.Container{}, err
+	}
 	// 保存元信息
 	if err := store.SaveMetadata(containerMeta); err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
+		_ = network.Teardown(ctx.Network)
 		_ = rootfs.Cleanup(containerMeta)
 		return meta.Container{}, err
 	}
@@ -90,6 +115,9 @@ func startContainer(ctx RuntimeContext, containerMeta meta.Container) (meta.Cont
 	waitErr := cmd.Wait()
 	containerMeta.Status = meta.StateStopped
 	if err := rootfs.Cleanup(containerMeta); err != nil {
+		return meta.Container{}, err
+	}
+	if err := network.Teardown(ctx.Network); err != nil {
 		return meta.Container{}, err
 	}
 	if err := store.SaveMetadata(containerMeta); err != nil {
@@ -116,31 +144,92 @@ func prepareRuntimeRootFS(ctx *RuntimeContext) error {
 	return nil
 }
 
+// 生成容器网络的有关配置
+func prepareRuntimeNetwork(ctx *RuntimeContext) error {
+	cfg, err := network.NewConfig(ctx.ContainerID)
+	if err != nil {
+		return err
+	}
+	ctx.Network = cfg
+	return nil
+}
+
+// 操作 host 侧网络
+func setupRuntimeNetwork(ctx *RuntimeContext, containerMeta *meta.Container, pid int) error {
+	if ctx.Network.ContainerIP == "" {
+		return fmt.Errorf("runtime network config is not prepared")
+	}
+	cfg := ctx.Network
+	if err := network.SetupHost(cfg, pid); err != nil {
+		return err
+	}
+	containerMeta.IPAddress = cfg.ContainerIP
+	containerMeta.Bridge = cfg.BridgeName
+	containerMeta.HostVeth = cfg.HostVethName
+	containerMeta.GuestVeth = cfg.GuestVethName
+	containerMeta.PeerVeth = cfg.PeerVethName
+	return nil
+}
+
 // 准备好创建容器内子进程的命令，返回命令和该进程的 io 清理函数
-func newChildCommand(ctx RuntimeContext) (*exec.Cmd, func(), error) {
+func newChildCommand(ctx RuntimeContext) (*exec.Cmd, io.Closer, func(), error) {
 	// 项目编译为二进制文件后可能会放在诸如 /usr/local/bin 这样的目录当中
 	// 所以要先获取获取可执行文件的绝对路径或者说名称
 	self, err := os.Executable()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve current executable: %w", err)
+		return nil, nil, nil, fmt.Errorf("resolve current executable: %w", err)
 	}
 
 	childArgs := []string{"run", ctx.Request.Image}
 	childArgs = append(childArgs, ctx.Request.Command...)
 	cmd := exec.Command(self, childArgs...)
 	if err := configureProcessIO(cmd, ctx); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+
+	// 父进程准备子进程命令时，还会创建一个管道 pipe，有什么用？主要是针对网络
+	// 子进程 cmd.Start() 以后会立刻跑 runContainerInit()，但父进程这时还在忙 SetupHost
+	// 如果子进程跑得太快，它会先执行 SetupContainer 配置容器内网络
+	// 可这时 peer 还没被挪进 netns，子进程可能提前退出
+	// 父进程再 LinkSetNsPid(...) 时就发现 PID 已死，操作失败
+	//  所以现在父进程创建一个 pipe，子进程 init 一开始先 waitForRuntimeReady()
+	// 父进程 SetupHost 成功后再 signalRuntimeReady()
+	// 这样子进程就先等父进程把 veth/bridge/netns 处理好
+	// 父进程放行，子进程再继续配置容器内 eth0
+	syncReader, syncWriter, err := os.Pipe() // 父进程拿写端，子进程拿读端
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create init sync pipe: %w", err)
+	}
+
+	// 把 syncReader 放进 cmd.ExtraFiles，这样子进程启动后，会额外继承一个文件描述符
+	// 我们知道 Unix 里一个进程一开始拥有的 fd 0/1/2 分别是 stdin/stdout/stderr
+	// 所以 ExtraFiles 会从 3 开始编号，这里算出了这个 fd 编号，并塞进环境变量
+	// COVET_INIT_SYNC_FD=<某个数字>，这样子进程就知道自己该去读哪个 fd
+	cmd.ExtraFiles = append(cmd.ExtraFiles, syncReader)
+	syncFD := 3 + len(cmd.ExtraFiles) - 1
 	// 通过环境变量区分父子进程，子进程再次进入 Run() 时，
 	// 发现这个环境变量已经存在，就不再继续创建下一层子进程，而是直接进入初始化逻辑
 	cmd.Env = append(os.Environ(), initEnv+"="+initStage, rootfsEnv+"="+ctx.MergedRootFS)
+	cmd.Env = append(cmd.Env, initSyncFDEnv+"="+strconv.Itoa(syncFD))
 	if len(ctx.Request.Mounts) > 0 {
 		// 父进程将请求参数中的 mounts 序列化为 json 存在环境变量中，从而使子进程启动后可读
 		mountsJSON, err := json.Marshal(ctx.Request.Mounts)
 		if err != nil {
-			return nil, nil, fmt.Errorf("marshal bind mounts: %w", err)
+			_ = syncReader.Close()
+			_ = syncWriter.Close()
+			return nil, nil, nil, fmt.Errorf("marshal bind mounts: %w", err)
 		}
 		cmd.Env = append(cmd.Env, mountsEnv+"="+string(mountsJSON))
+	}
+	if ctx.Network.ContainerIP != "" {
+		// 同样在环境变量中存储 network config json
+		networkJSON, err := json.Marshal(ctx.Network)
+		if err != nil {
+			_ = syncReader.Close()
+			_ = syncWriter.Close()
+			return nil, nil, nil, fmt.Errorf("marshal network config: %w", err)
+		}
+		cmd.Env = append(cmd.Env, networkEnv+"="+string(networkJSON))
 	}
 	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -152,7 +241,9 @@ func newChildCommand(ctx RuntimeContext) (*exec.Cmd, func(), error) {
 		Unshareflags: syscall.CLONE_NEWNS,
 	}
 
-	return cmd, func() {
+	// 返回子进程启动命令和 pipe 写端
+	return cmd, syncWriter, func() {
+		_ = syncReader.Close()
 		closeProcessIO(cmd)
 	}, nil
 }
@@ -187,6 +278,22 @@ func closeProcessIO(cmd *exec.Cmd) {
 	}
 }
 
+// 通过 syncWriter 往另一端发信号
+func signalRuntimeReady(syncWriter io.Closer) error {
+	file, ok := syncWriter.(*os.File)
+	if !ok {
+		return fmt.Errorf("invalid init sync writer type %T", syncWriter)
+	}
+	if _, err := file.Write([]byte{1}); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("signal container init after runtime setup: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close init sync writer: %w", err)
+	}
+	return nil
+}
+
 // 应用资源控制组
 func applyRuntimeResources(pid int, resources cgroups.ResourceConfig) (func(), error) {
 	if resources.MemoryLimit == "" && resources.CPUWeight == 0 {
@@ -209,6 +316,11 @@ func newContainerMetadata(ctx RuntimeContext) meta.Container {
 		Command:     append([]string(nil), ctx.Request.Command...),
 		Image:       ctx.Request.Image,
 		Mounts:      toMetadataMounts(ctx.Request.Mounts),
+		IPAddress:   ctx.Network.ContainerIP,
+		Bridge:      ctx.Network.BridgeName,
+		HostVeth:    ctx.Network.HostVethName,
+		GuestVeth:   ctx.Network.GuestVethName,
+		PeerVeth:    ctx.Network.PeerVethName,
 		MemoryLimit: ctx.Request.Resources.MemoryLimit,
 		CPUWeight:   ctx.Request.Resources.CPUWeight,
 		Status:      meta.StateRunning,

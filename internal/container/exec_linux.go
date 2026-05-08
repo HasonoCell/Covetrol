@@ -61,6 +61,18 @@ func execInContainer(pid int, command []string) error {
 	// 记得关文件～
 	defer closeNamespaceFiles(nsFiles)
 
+	rootFile, err := os.Open(fmt.Sprintf("/proc/%d/root", pid))
+	if err != nil {
+		return fmt.Errorf("open container root for pid %d: %w", pid, err)
+	}
+	defer rootFile.Close()
+
+	// 当前线程如果和别的线程共享 fs state（root/cwd 等），进入别的 mount namespace 会返回 EINVAL
+	// 先 unshare 一份线程私有的 fs 视图，再逐个 setns
+	if err := syscall.Unshare(syscall.CLONE_FS); err != nil {
+		return fmt.Errorf("unshare fs state before setns: %w", err)
+	}
+
 	// 先进入会立即影响当前线程的 namespace
 	for _, nsFile := range nsFiles[:4] { // 这里包含了 ipc, uts, net, mnt
 
@@ -74,11 +86,14 @@ func execInContainer(pid int, command []string) error {
 	}
 
 	// setns 到 mount namespace 之后，还需要把当前进程的根目录切到目标容器根
-	// 否则绝对路径仍然会从宿主进程当前 root 开始解析
-	rootPath := fmt.Sprintf("/proc/%d/root", pid)
+	// 否则绝对路径仍然会从宿主进程当前 root 开始解析。
+	// 这里不能再依赖 /proc/<pid>/root 这个路径字符串，因为切进目标 mount namespace 后 /proc 视图可能已经变化了。
+	if err := syscall.Fchdir(int(rootFile.Fd())); err != nil {
+		return fmt.Errorf("fchdir to container root for pid %d: %w", pid, err)
+	}
 	// 所以需要手动 chroot（和前面的 pivot_root 注意区分）
-	if err := syscall.Chroot(rootPath); err != nil {
-		return fmt.Errorf("chroot to %s: %w", rootPath, err)
+	if err := syscall.Chroot("."); err != nil {
+		return fmt.Errorf("chroot to container root for pid %d: %w", pid, err)
 	}
 	if err := syscall.Chdir("/"); err != nil {
 		return fmt.Errorf("chdir to / after chroot: %w", err)

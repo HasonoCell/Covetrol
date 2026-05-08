@@ -5,10 +5,13 @@ package container
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"syscall"
 
 	"covet/internal/mount"
+	"covet/internal/network"
 	"covet/internal/rootfs"
 )
 
@@ -16,8 +19,15 @@ const initEnv = "COVET_STAGE"
 const initStage = "init"
 const rootfsEnv = "COVET_ROOTFS"
 const mountsEnv = "COVET_MOUNTS"
+const networkEnv = "COVET_NETWORK"
+const initSyncFDEnv = "COVET_INIT_SYNC_FD"
 
 func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
+	// 先等父进程完成所有配置后发信号，再初始化容器
+	if err := waitForRuntimeReady(); err != nil {
+		return err
+	}
+
 	// 子进程即容器内进程。前面 namespace flags 创建好了 namespace
 	// 现在调用一系列 syscall 去初始化配置 namespace
 	if err := syscall.Sethostname([]byte("covet")); err != nil {
@@ -49,6 +59,18 @@ func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 		}
 	}
 
+	// 解析父进程通过 env 传下来的 network config，开始容器侧 network setup
+	networkJSON := os.Getenv(networkEnv)
+	if networkJSON != "" {
+		var cfg network.Config
+		if err := json.Unmarshal([]byte(networkJSON), &cfg); err != nil {
+			return fmt.Errorf("decode network config: %w", err)
+		}
+		if err := network.SetupContainer(cfg); err != nil {
+			return err
+		}
+	}
+
 	if err := os.MkdirAll("/proc", 0o555); err != nil {
 		return fmt.Errorf("ensure /proc exists: %w", err)
 	}
@@ -68,4 +90,33 @@ func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 
 	// 通过 exec 将原本通过 go 代码创建的子进程彻底替换为目标进程
 	return syscall.Exec(path, command, os.Environ())
+}
+
+func waitForRuntimeReady() error {
+	// 拿到父进程传下来的 ExtraFiles fd
+	fdValue := os.Getenv(initSyncFDEnv)
+	if fdValue == "" {
+		return nil
+	}
+
+	// fd 转成数字
+	fd, err := strconv.Atoi(fdValue)
+	if err != nil {
+		return fmt.Errorf("parse %s=%q: %w", initSyncFDEnv, fdValue, err)
+	}
+
+	// 这里 fd 对应的本质是一个 pipe 读端，将这个 pipe 包装成一个 file
+	file := os.NewFile(uintptr(fd), "covet-init-sync")
+	if file == nil {
+		return fmt.Errorf("open init sync fd %d", fd)
+	}
+	defer file.Close()
+
+	buf := make([]byte, 1)
+	// 关键！如果 pipe 写端一直不写数据，file.Read 会一直阻塞，这样就实现了等待
+	_, err = file.Read(buf)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("wait for runtime network setup: %w", err)
+	}
+	return nil
 }
