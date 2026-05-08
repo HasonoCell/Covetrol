@@ -44,6 +44,8 @@ func Run(args []string) error {
 		return pack(args[1:])
 	case "images":
 		return images()
+	case "image":
+		return imageCommand(args[1:])
 	case "volumes":
 		return volumes()
 	case "volume":
@@ -80,9 +82,13 @@ func run(args []string) error {
 	}
 	imageName := positional[0]
 	command := positional[1:]
+	// 如果 run 时没传 command，就采用默认 command
 	if len(command) == 0 {
-		// 目前还没有镜像元数据里的默认 CMD，所以先约定省略命令时默认进入 /bin/sh。
-		command = []string{"/bin/sh"}
+		var err error
+		command, err = image.DefaultCommand(imageName)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 将诸如 256m, 256mb 这样的 mem 参数转换为纯字节数的字符串格式
@@ -204,7 +210,7 @@ func exec(args []string) error {
 
 func pack(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: covet commit <rootfs-path> <image-name>")
+		return fmt.Errorf("usage: covet pack <rootfs-path> <image-name>")
 	}
 
 	// 将一个 rootfs 目录打包为本地镜像仓库中的 tar 文件
@@ -213,7 +219,7 @@ func pack(args []string) error {
 
 func unpack(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: covet import <image-name> <rootfs-path>")
+		return fmt.Errorf("usage: covet unpack <image-name> <rootfs-path>")
 	}
 
 	// 从本地镜像 tar 恢复出一个新的 rootfs 目录
@@ -230,6 +236,54 @@ func images() error {
 	for _, imageName := range imageNames {
 		fmt.Println(imageName)
 	}
+	return nil
+}
+
+func imageCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: covet image inspect <name>")
+	}
+
+	switch args[0] {
+	case "inspect":
+		return imageInspect(args[1:])
+	default:
+		return fmt.Errorf("unknown image subcommand %q", args[0])
+	}
+}
+
+func imageInspect(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: covet image inspect <name>")
+	}
+
+	info, err := image.Inspect(args[0])
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Name:\t%s\n", info.Name)
+	fmt.Printf("Format:\t%s\n", info.Format)
+	fmt.Printf("Path:\t%s\n", info.Path)
+	if info.ManifestPath != "" {
+		fmt.Printf("Manifest:\t%s\n", info.ManifestPath)
+	}
+	if info.ConfigPath != "" {
+		fmt.Printf("Config:\t%s\n", info.ConfigPath)
+	}
+	if len(info.Cmd) == 0 {
+		fmt.Printf("Cmd:\t-\n")
+	} else {
+		fmt.Printf("Cmd:\t%s\n", strings.Join(info.Cmd, " "))
+	}
+	if !info.CreatedAt.IsZero() {
+		fmt.Printf("Created:\t%s\n", info.CreatedAt.Format(time.RFC3339))
+	}
+	if len(info.Layers) == 0 {
+		fmt.Printf("Layers:\t-\n")
+		return nil
+	}
+	fmt.Printf("Layers:\t%s\n", strings.Join(info.Layers, ", "))
 	return nil
 }
 
@@ -313,7 +367,7 @@ func volumeRemove(args []string) error {
 }
 
 func usageError(prefix string) error {
-	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] [-d] [-v /host:/container[:ro]] [-v volume:/container[:ro]] <image-name> [command] [args...]\n  covet ps\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet pack <rootfs-path> <image-name>\n  covet unpack <image-name> <rootfs-path>\n  covet images\n  covet volumes\n  covet volume inspect <name>\n  covet volume rm <name>\n\ncurrent commands:\n  run      start a process from a local image, then apply namespaces, mounts, and optional cgroup v2 limits (linux only)\n  ps       show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  pack     pack a rootfs directory into a local image tar\n  unpack   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images\n  volumes  list named volumes stored under .covet/volumes\n  volume   inspect or remove a named volume"
+	usage := "usage:\n  covet run [--mem 256m] [--cpu-weight 100] [-d] [-v /host:/container[:ro]] [-v volume:/container[:ro]] <image-name> [command] [args...]\n  covet ps\n  covet logs <container-id>\n  covet stop <container-id>\n  covet rm <container-id>\n  covet exec <container-id> <command> [args...]\n  covet pack <rootfs-path> <image-name>\n  covet unpack <image-name> <rootfs-path>\n  covet images\n  covet image inspect <name>\n  covet volumes\n  covet volume inspect <name>\n  covet volume rm <name>\n\ncurrent commands:\n  run      start a process from a local image, then apply namespaces, mounts, and optional cgroup v2 limits (linux only)\n  ps       show persisted container metadata\n  logs     print the container log file\n  stop     stop a running container by id\n  rm       remove a stopped container state directory\n  exec     run a new command inside an existing container\n  pack     pack a rootfs directory into a local image tar\n  unpack   unpack a local image tar into a rootfs directory\n  images   list image tars stored under .covet/images\n  image    inspect image metadata\n  volumes  list named volumes stored under .covet/volumes\n  volume   inspect or remove a named volume"
 	if prefix == "" {
 		return errors.New(usage)
 	}

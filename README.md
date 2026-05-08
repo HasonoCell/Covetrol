@@ -43,6 +43,7 @@ sudo apt install -y busybox-static
 
 ```bash
 ./covet pack /tmp/covet-rootfs busybox-base
+./covet image inspect busybox-base
 ```
 
 ## 运行

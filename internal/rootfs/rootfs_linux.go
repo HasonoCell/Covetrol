@@ -150,13 +150,7 @@ func ResolveCommandPath(command string) (string, error) {
 }
 
 func ValidateImage(imageName string) error {
-	if imageName == "" {
-		return fmt.Errorf("image name is required")
-	}
-	if _, err := os.Stat(store.ImagePath(imageName)); err != nil {
-		return fmt.Errorf("stat image %q: %w", imageName, err)
-	}
-	return nil
+	return image.Validate(imageName)
 }
 
 func resolveCommandInRootFS(rootfs, command, pathEnv string) (string, error) {

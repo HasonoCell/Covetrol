@@ -34,8 +34,24 @@ func ImagesDir() string {
 	return filepath.Join(".", imageDirName)
 }
 
-func ImagePath(name string) string {
+func LegacyImagePath(name string) string {
 	return filepath.Join(ImagesDir(), name+".tar")
+}
+
+func ImageDir(name string) string {
+	return filepath.Join(ImagesDir(), name)
+}
+
+func ImageLayerPath(name string) string {
+	return filepath.Join(ImageDir(name), "layer.tar")
+}
+
+func ImageManifestPath(name string) string {
+	return filepath.Join(ImageDir(name), "manifest.json")
+}
+
+func ImageConfigPath(name string) string {
+	return filepath.Join(ImageDir(name), "config.json")
 }
 
 func ContainerRootFSDir(id string) string {
