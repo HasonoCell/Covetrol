@@ -9,9 +9,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"covet/internal/meta"
-	"covet/internal/rootfs"
-	"covet/internal/store"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/rootfs"
+	"covetrol/covet/internal/store"
 )
 
 // docker exec 这个命令当时学 docker 的时候还不太明白有啥作用，写完这个文件一下子就清晰了

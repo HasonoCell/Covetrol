@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"covet/internal/store"
+	"covetrol/covet/internal/store"
 )
 
 type Config struct {

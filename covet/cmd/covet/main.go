@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"covet/internal/cli"
+	"covetrol/covet/internal/cli"
 )
 
 func main() {

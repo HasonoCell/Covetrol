@@ -8,8 +8,8 @@ import (
 	"sort"
 	"syscall"
 
-	"covet/internal/meta"
-	"covet/internal/mount"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/mount"
 )
 
 const (

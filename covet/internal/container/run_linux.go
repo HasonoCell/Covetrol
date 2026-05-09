@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"covet/internal/cgroups"
-	"covet/internal/meta"
-	"covet/internal/mount"
-	"covet/internal/network"
-	"covet/internal/rootfs"
-	"covet/internal/store"
+	"covetrol/covet/internal/cgroups"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/mount"
+	"covetrol/covet/internal/network"
+	"covetrol/covet/internal/rootfs"
+	"covetrol/covet/internal/store"
 )
 
 // Run 返回一个 Container 结构体，用来后续管理生命周期

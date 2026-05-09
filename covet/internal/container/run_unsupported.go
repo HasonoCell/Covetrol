@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"covet/internal/meta"
+	"covetrol/covet/internal/meta"
 )
 
 func Run(req RunRequest) (meta.Container, error) {

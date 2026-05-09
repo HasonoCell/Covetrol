@@ -1,4 +1,4 @@
-module covet
+module covetrol
 
 go 1.26
 

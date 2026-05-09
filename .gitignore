@@ -1,2 +1,5 @@
-covet
-.covet
+.covet/
+/covet-bin
+/covelet-bin
+/covet-controller-bin
+/covet-cni-bin

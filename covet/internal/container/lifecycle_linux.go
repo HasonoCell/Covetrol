@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"covet/internal/cgroups"
-	"covet/internal/meta"
-	"covet/internal/network"
-	"covet/internal/rootfs"
-	"covet/internal/store"
+	"covetrol/covet/internal/cgroups"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/network"
+	"covetrol/covet/internal/rootfs"
+	"covetrol/covet/internal/store"
 )
 
 func Start(id string) error {

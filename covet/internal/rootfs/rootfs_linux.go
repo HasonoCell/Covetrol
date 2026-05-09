@@ -9,10 +9,10 @@ import (
 	"strings"
 	"syscall"
 
-	"covet/internal/image"
-	"covet/internal/meta"
-	"covet/internal/mount"
-	"covet/internal/store"
+	"covetrol/covet/internal/image"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/mount"
+	"covetrol/covet/internal/store"
 )
 
 const defaultPathEnv = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"syscall"
 
-	"covet/internal/mount"
-	"covet/internal/network"
-	"covet/internal/rootfs"
+	"covetrol/covet/internal/mount"
+	"covetrol/covet/internal/network"
+	"covetrol/covet/internal/rootfs"
 )
 
 const initEnv = "COVET_STAGE"

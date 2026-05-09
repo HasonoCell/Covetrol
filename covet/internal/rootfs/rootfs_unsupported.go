@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"runtime"
 
-	"covet/internal/meta"
-	"covet/internal/mount"
+	"covetrol/covet/internal/meta"
+	"covetrol/covet/internal/mount"
 )
 
 func PrepareOverlay(containerID, imageName string, mounts []mount.Mount) (string, error) {

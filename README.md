@@ -1,52 +1,25 @@
-# covet
+# covetrol
 
-`covet` 是一个从零开始实现的学习型容器运行时项目，部分参考了《自己动手写 Docker 这本书》，提供了一个最小但完整的本地容器体验：可以基于本地镜像启动容器、限制资源、管理生命周期、挂载数据卷，并为容器提供独立网络和容器间通信能力。这个项目挺有意思的，了解了一些容器的底层实现知识～
+`covetrol` 是一个学习性质的手写容器编排项目，目标是从一个自研的轻量容器运行时逐步往上构建出最小可用的节点代理、控制循环和网络组件。
 
-## 环境要求
+当前仓库的组件规划如下：
 
-Linux，cgroup v2，以及一个可用的 `busybox` rootfs 或者你自己的 rootfs～
+- `covet/`
+  当前已经完成的容器运行时，负责镜像、rootfs、容器生命周期、volume、bridge 网络等能力
+- `covelet/`
+  计划中的节点代理，负责把 Pod 规格翻译成对 `covet` 的调用
+- `covet-controller/`
+  计划中的最小控制循环组件
+- `covet-cni/`
+  计划中的网络组件
 
-## 构建
+当前最完整的组件是 `covet`。它的使用方式、命令参考和 smoke test 请直接查看：
 
-```bash
-go build -o covet ./cmd/covet
-```
+- [covet/README.md](./covet/README.md)
 
-## 准备 rootfs
+当前建议的开发顺序：
 
-提供了一个辅助脚本来帮助准备 rootfs：
-
-```bash
-./scripts/prepare_busybox_rootfs.sh /tmp/covet-rootfs
-```
-
-这个脚本会：复制 busybox，创建 /bin/sh，准备最小目录结构，以及在需要时复制动态链接依赖。
-
-Ubuntu 上建议安装：
-
-```bash
-sudo apt update
-sudo apt install -y busybox-static
-```
-
-## 命令参考
-
-- 打包本地镜像：`./covet pack /tmp/covet-rootfs busybox`
-- 查看镜像列表：`./covet images`
-- 查看镜像详情：`./covet image inspect busybox`
-- 解包镜像：`./covet unpack busybox /tmp/unpacked-rootfs`
-- 启动前台容器：`sudo ./covet run busybox`
-- 启动后台容器：`sudo ./covet run -d busybox /bin/busybox sleep 600`
-- 指定资源限制：`sudo ./covet run --mem 256m --cpu-weight 100 busybox /bin/sh`
-- 查看容器列表：`./covet ps`
-- 查看容器日志：`./covet logs <container-id>`
-- 在容器内执行命令：`sudo ./covet exec <container-id> /bin/sh`
-- 停止容器：`sudo ./covet stop <container-id>`
-- 启动已存在容器：`sudo ./covet start <container-id>`
-- 删除容器：`sudo ./covet rm <container-id>`
-- bind mount：`sudo ./covet run -v /tmp/data:/data busybox /bin/sh`
-- named volume：`sudo ./covet run -v mydata:/data busybox /bin/sh`
-- 查看 volume 列表：`./covet volumes`
-- 查看 volume 详情：`./covet volume inspect mydata`
-- 删除 volume：`./covet volume rm mydata`
-- 网络 smoke test：`sudo ./scripts/smoke_test_network.sh ./covet busybox`
+1. 保持 `covet` 稳定，作为底层容器运行时
+2. 先实现 `covelet` 的最小 Pod 运行闭环
+3. 再补 `covet-controller`
+4. 最后再把网络进一步抽象到 `covet-cni`

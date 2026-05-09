@@ -3,7 +3,7 @@ package container
 import (
 	"fmt"
 
-	"covet/internal/rootfs"
+	"covetrol/covet/internal/rootfs"
 )
 
 func ValidateRequest(req RunRequest) error {

@@ -3,7 +3,7 @@ package meta
 import (
 	"time"
 
-	"covet/internal/mount"
+	"covetrol/covet/internal/mount"
 )
 
 type State string

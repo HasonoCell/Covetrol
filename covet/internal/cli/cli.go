@@ -10,11 +10,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"covet/internal/cgroups"
-	"covet/internal/container"
-	"covet/internal/image"
-	"covet/internal/mount"
-	"covet/internal/store"
+	"covetrol/covet/internal/cgroups"
+	"covetrol/covet/internal/container"
+	"covetrol/covet/internal/image"
+	"covetrol/covet/internal/mount"
+	"covetrol/covet/internal/store"
 )
 
 // main 是项目主入口，cli 来分发不同的命令

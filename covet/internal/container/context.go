@@ -1,9 +1,9 @@
 package container
 
 import (
-	"covet/internal/cgroups"
-	"covet/internal/mount"
-	"covet/internal/network"
+	"covetrol/covet/internal/cgroups"
+	"covetrol/covet/internal/mount"
+	"covetrol/covet/internal/network"
 )
 
 // RunRequest 只表示用户显式请求的运行参数
