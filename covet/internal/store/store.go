@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 
 	"covetrol/covet/internal/meta"
@@ -187,7 +188,20 @@ func RefreshMetadata(containerMeta meta.Container) (meta.Container, error) {
 
 func isProcessRunning(pid int) bool {
 	err := syscall.Kill(pid, 0)
-	return err == nil
+	if err != nil {
+		return false
+	}
+
+	statPath := filepath.Join("/proc", fmt.Sprintf("%d", pid), "stat")
+	data, readErr := os.ReadFile(statPath)
+	if readErr != nil {
+		return true
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) >= 3 && fields[2] == "Z" {
+		return false
+	}
+	return true
 }
 
 func ContainersUsingVolume(name string) ([]meta.Container, error) {

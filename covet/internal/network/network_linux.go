@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	defaultBridgeName = "covet0" // 默认宿主机上的 linux bridge 名称
-	defaultBridgeCIDR = "10.200.0.1/24"
-	defaultGuestVeth  = "eth0"
+	defaultBridgeName = "covet0"        // 默认宿主机上的 linux bridge 名称
+	defaultBridgeCIDR = "10.200.0.1/24" // bridge 的默认 ip 地址，宿主机根据此 ip 与 netns 通信
+	defaultGuestVeth  = "eth0"          // 容器内最终的 guest veth 名字
 )
 
 func NewConfig(containerID string) (Config, error) {
@@ -29,8 +29,11 @@ func NewConfig(containerID string) (Config, error) {
 		ContainerCIDR: cidr,
 		ContainerIP:   ip,
 		HostVethName:  "v" + containerID[:11],
-		PeerVethName:  "c" + containerID[:11], // peer 这里先给一个临时名字，host 和 peer 都是父进程侧用到的东西
-		GuestVethName: defaultGuestVeth,       // guest 是容器内子进程用到的东西
+		// 为什么 peer 不直接使用 veth guest 侧的最终名字 eth0 而是要先取一个临时的名字呢
+		// 因为整个 veth pair 的创建是发生在宿主机上的，避免 peer 的名字 eth0 与宿主机上已有的网络设备名字冲突
+		// 所以创建时，我们先给一个临时名字，等到把 guest veth 真正放进容器内 netns 后再改名为 eth0
+		PeerVethName:  "c" + containerID[:11],
+		GuestVethName: defaultGuestVeth, // guest 是容器内子进程用到的东西
 	}, nil
 }
 

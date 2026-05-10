@@ -1,0 +1,13 @@
+apiVersion: covetrol/v1
+kind: Pod
+metadata:
+    name: busybox-pod
+spec:
+    containers:
+        - name: main
+          image: busybox
+          command:
+              - /bin/busybox
+              - sleep
+          args:
+              - '600'
