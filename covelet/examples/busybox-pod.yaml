@@ -11,3 +11,10 @@ spec:
               - sleep
           args:
               - '600'
+        - name: debug
+          image: busybox
+          command:
+              - /bin/busybox
+              - sleep
+          args:
+              - '600'

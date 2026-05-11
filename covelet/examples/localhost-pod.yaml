@@ -1,0 +1,23 @@
+apiVersion: covetrol/v1
+kind: Pod
+metadata:
+  name: localhost-pod
+spec:
+  containers:
+    - name: web
+      image: busybox
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - |
+          while true; do
+            printf 'HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nlocalhost-ok' | /bin/busybox nc -l -p 8080
+          done
+    - name: debug
+      image: busybox
+      command:
+        - /bin/busybox
+        - sleep
+      args:
+        - "600"

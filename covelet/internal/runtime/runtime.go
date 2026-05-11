@@ -3,14 +3,17 @@ package runtime
 import corev1 "covetrol/pkg/apis/core/v1"
 
 type RunContainerRequest struct {
-	PodName   string
-	Container corev1.ContainerSpec
+	PodName      string
+	Container    corev1.ContainerSpec
+	ShareNetWith string
+	Infra        bool
 }
 
 type ContainerInfo struct {
 	ID     string
 	Status string
 	Image  string
+	IP     string
 }
 
 type Runtime interface {

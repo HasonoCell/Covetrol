@@ -32,6 +32,8 @@ type VolumeMount struct {
 
 type PodStatus struct {
 	Phase             string            `json:"phase,omitempty" yaml:"phase,omitempty"`
+	PodIP             string            `json:"podIP,omitempty" yaml:"podIP,omitempty"`
+	InfraContainerID  string            `json:"infraContainerID,omitempty" yaml:"infraContainerID,omitempty"`
 	ContainerStatuses []ContainerStatus `json:"containerStatuses,omitempty" yaml:"containerStatuses,omitempty"`
 }
 

@@ -21,6 +21,7 @@ const baseDir = ".covetrol/pods"
 type ContainerRecord struct {
 	Name        string `json:"name"`
 	ContainerID string `json:"container_id"`
+	Infra       bool   `json:"infra,omitempty"`
 }
 
 func PodDir(name string) string {

@@ -14,6 +14,8 @@ type covetContainerMeta struct {
 	ID     string `json:"id"`
 	Image  string `json:"image,omitempty"`
 	Status string `json:"status"`
+	// 一个 pod 暴露出去的 ip，本质上是 pod 中 infra container 的 ip
+	IP string `json:"ip_address,omitempty"`
 }
 
 // 容器引擎 covet 的 struct 抽象
@@ -33,6 +35,11 @@ func NewCovetCLI(binaryPath, workingDir string) *CovetCLI {
 func (r *CovetCLI) RunContainer(req RunContainerRequest) (string, error) {
 	// 基本参数
 	args := []string{"run", "-d"}
+
+	// 共享 infra container 的 netns
+	if req.ShareNetWith != "" {
+		args = append(args, "--share-net-with", req.ShareNetWith)
+	}
 
 	// 加上 volume 挂载有关参数
 	for _, volume := range req.Container.Volumes {
@@ -93,6 +100,7 @@ func (r *CovetCLI) InspectContainer(id string) (ContainerInfo, error) {
 		ID:     containerMeta.ID,
 		Status: containerMeta.Status,
 		Image:  containerMeta.Image,
+		IP:     containerMeta.IP,
 	}, nil
 }
 
