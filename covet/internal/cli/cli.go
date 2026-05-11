@@ -66,6 +66,7 @@ func run(args []string) error {
 	memLimit := flagset.String("mem", "", "memory limit, for example 256m")
 	cpuWeight := flagset.Int("cpu-weight", 0, "cgroup v2 cpu.weight value, 1-10000")
 	detach := flagset.Bool("d", false, "run container in background")
+	shareNetWith := flagset.String("share-net-with", "", "join the network namespace of an existing container")
 	var mounts mount.List
 	flagset.Var(&mounts, "v", "mount in the form /host:/container[:ro] or volume:/container[:ro]")
 
@@ -103,9 +104,10 @@ func run(args []string) error {
 	}
 
 	req := container.RunRequest{
-		Command: command,
-		Image:   imageName,
-		Detach:  *detach,
+		Command:      command,
+		Image:        imageName,
+		Detach:       *detach,
+		ShareNetWith: *shareNetWith,
 		Resources: cgroups.ResourceConfig{
 			MemoryLimit: memoryLimit,
 			CPUWeight:   *cpuWeight,

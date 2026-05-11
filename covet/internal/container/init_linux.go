@@ -21,10 +21,15 @@ const rootfsEnv = "COVET_ROOTFS"
 const mountsEnv = "COVET_MOUNTS"
 const networkEnv = "COVET_NETWORK"
 const initSyncFDEnv = "COVET_INIT_SYNC_FD"
+const shareNetPIDEnv = "COVET_SHARE_NET_PID"
 
 func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 	// 先等父进程完成所有配置后发信号，再初始化容器
 	if err := waitForRuntimeReady(); err != nil {
+		return err
+	}
+	// 首先加入要共享的 netns
+	if err := joinSharedNetNamespace(); err != nil {
 		return err
 	}
 
@@ -66,8 +71,12 @@ func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 		if err := json.Unmarshal([]byte(networkJSON), &cfg); err != nil {
 			return fmt.Errorf("decode network config: %w", err)
 		}
-		if err := network.SetupContainer(cfg); err != nil {
-			return err
+
+		// 如果不是共享才 setup，否则前面 joinSharedNetNamespace 已经加入 netns 了
+		if os.Getenv(shareNetPIDEnv) == "" {
+			if err := network.SetupContainer(cfg); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -90,6 +99,28 @@ func runContainerInit(command []string, mergedRootFS, mountsJSON string) error {
 
 	// 通过 exec 将原本通过 go 代码创建的子进程彻底替换为目标进程
 	return syscall.Exec(path, command, os.Environ())
+}
+
+func joinSharedNetNamespace() error {
+	sharePIDValue := os.Getenv(shareNetPIDEnv)
+	if sharePIDValue == "" {
+		return nil
+	}
+	sharePID, err := strconv.Atoi(sharePIDValue)
+	if err != nil {
+		return fmt.Errorf("parse %s=%q: %w", shareNetPIDEnv, sharePIDValue, err)
+	}
+	// 如何加入已有 netns？通过打开要共享的容器的 /proc/<pid>/ns/net 作为 file
+	nsFile, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", sharePID))
+	if err != nil {
+		return fmt.Errorf("open target net namespace for pid %d: %w", sharePID, err)
+	}
+	defer nsFile.Close()
+	// 再把该 file 的 fd 当作参数调用 setns
+	if err := sys_setns(int(nsFile.Fd()), 0); err != nil {
+		return err
+	}
+	return nil
 }
 
 func waitForRuntimeReady() error {

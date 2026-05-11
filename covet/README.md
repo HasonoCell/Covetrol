@@ -50,3 +50,5 @@ sudo apt install -y busybox-static
 - 查看 volume 详情：`./covet volume inspect mydata`
 - 删除 volume：`./covet volume rm mydata`
 - 网络 smoke test：`sudo ./scripts/smoke_test_network.sh ./covet busybox`
+- 加入已有 net namespace：`sudo ./covet run -d --share-net-with <container-id> busybox /bin/busybox sleep 600`
+- share-net smoke test：`sudo ROOTFS_PATH=/tmp/covet-rootfs ./scripts/smoke_test_share_net.sh`

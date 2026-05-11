@@ -146,6 +146,33 @@ func prepareRuntimeRootFS(ctx *RuntimeContext) error {
 
 // 生成容器网络的有关配置
 func prepareRuntimeNetwork(ctx *RuntimeContext) error {
+	// 如果是共享 netns 模式，复用 netns 配置
+	if ctx.Request.ShareNetWith != "" {
+		// 加载复用配置的容器元信息
+		sharedMeta, err := store.LoadMetadata(ctx.Request.ShareNetWith)
+		if err != nil {
+			return fmt.Errorf("load share-net-with container %q: %w", ctx.Request.ShareNetWith, err)
+		}
+		sharedMeta, err = store.RefreshMetadata(sharedMeta)
+		if err != nil {
+			return err
+		}
+		// 得到要共享 netns 的 pid
+		ctx.ShareNetPID = sharedMeta.PID
+		ctx.Network = network.Config{
+			BridgeName:    sharedMeta.Bridge,
+			BridgeIP:      "10.200.0.1",
+			BridgeCIDR:    "10.200.0.1/24",
+			ContainerIP:   sharedMeta.IPAddress,
+			ContainerCIDR: sharedMeta.IPAddress + "/24",
+			HostVethName:  sharedMeta.HostVeth,
+			GuestVethName: sharedMeta.GuestVeth,
+			PeerVethName:  sharedMeta.PeerVeth,
+		}
+		return nil
+	}
+
+	// 如果不是共享模式，创建新配置
 	cfg, err := network.NewConfig(ctx.ContainerID)
 	if err != nil {
 		return err
@@ -156,6 +183,13 @@ func prepareRuntimeNetwork(ctx *RuntimeContext) error {
 
 // 操作 host 侧网络
 func setupRuntimeNetwork(ctx *RuntimeContext, containerMeta *meta.Container, pid int) error {
+	if ctx.Request.ShareNetWith != "" {
+		containerMeta.IPAddress = ctx.Network.ContainerIP
+		containerMeta.Bridge = ctx.Network.BridgeName
+		containerMeta.GuestVeth = ctx.Network.GuestVethName
+		containerMeta.PeerVeth = ctx.Network.PeerVethName
+		return nil
+	}
 	if ctx.Network.ContainerIP == "" {
 		return fmt.Errorf("runtime network config is not prepared")
 	}
@@ -231,13 +265,21 @@ func newChildCommand(ctx RuntimeContext) (*exec.Cmd, io.Closer, func(), error) {
 		}
 		cmd.Env = append(cmd.Env, networkEnv+"="+string(networkJSON))
 	}
+	// 如果是共享模式，将 id 通过环境变量传下去
+	if ctx.ShareNetPID > 0 {
+		cmd.Env = append(cmd.Env, shareNetPIDEnv+"="+strconv.Itoa(ctx.ShareNetPID))
+	}
 	// 修改 SystemProcessAttributes，用于在创建新系统进程时，指定特定的操作系统属性
+	cloneFlags := uintptr(syscall.CLONE_NEWUTS |
+		syscall.CLONE_NEWPID |
+		syscall.CLONE_NEWNS |
+		syscall.CLONE_NEWIPC)
+	// 新容器如果是共享模式就不再创建新的 netns 了
+	if ctx.Request.ShareNetWith == "" {
+		cloneFlags |= syscall.CLONE_NEWNET
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS |
-			syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWNS |
-			syscall.CLONE_NEWIPC |
-			syscall.CLONE_NEWNET,
+		Cloneflags:   cloneFlags,
 		Unshareflags: syscall.CLONE_NEWNS,
 	}
 
