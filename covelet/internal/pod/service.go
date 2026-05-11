@@ -3,6 +3,7 @@ package pod
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"covetrol/covelet/internal/runtime"
 	"covetrol/covelet/internal/store"
@@ -34,6 +35,20 @@ func (s *Service) Run(pod corev1.Pod) error {
 		return err
 	}
 
+	startedRecords := make([]store.ContainerRecord, 0, len(pod.Spec.Containers)+1)
+	rollback := func(runErr error) error {
+		_ = cleanupRecords(startedRecords, s.runtime)
+		status.Phase = "Failed"
+		status.ContainerStatuses = nil
+		if err := store.SaveContainerRecords(pod.Metadata.Name, nil); err != nil {
+			return err
+		}
+		if err := store.SavePodStatus(pod.Metadata.Name, status); err != nil {
+			return err
+		}
+		return runErr
+	}
+
 	// 准备好 infra 容器配置
 	infraSpec := infraContainerSpec(pod.Metadata.Name)
 	// ! 先启动 infra 容器
@@ -43,24 +58,21 @@ func (s *Service) Run(pod corev1.Pod) error {
 		Infra:     true,
 	})
 	if err != nil {
-		status.Phase = "Failed"
-		_ = store.SavePodStatus(pod.Metadata.Name, status)
-		return fmt.Errorf("run infra container for pod %q: %w", pod.Metadata.Name, err)
+		return rollback(fmt.Errorf("run infra container for pod %q: %w", pod.Metadata.Name, err))
 	}
-	infraInfo, err := s.runtime.InspectContainer(infraID)
-	if err != nil {
-		status.Phase = "Failed"
-		_ = store.SavePodStatus(pod.Metadata.Name, status)
-		return fmt.Errorf("inspect infra container %q for pod %q: %w", infraID, pod.Metadata.Name, err)
-	}
-
-	// ! 再准备好业务容器配置并逐个启动业务容器
-	records := make([]store.ContainerRecord, 0, len(pod.Spec.Containers)+1)
-	records = append(records, store.ContainerRecord{
+	startedRecords = append(startedRecords, store.ContainerRecord{
 		Name:        infraSpec.Name,
 		ContainerID: infraID,
 		Infra:       true,
 	})
+	infraInfo, err := s.runtime.InspectContainer(infraID)
+	if err != nil {
+		return rollback(fmt.Errorf("inspect infra container %q for pod %q: %w", infraID, pod.Metadata.Name, err))
+	}
+
+	// ! 再准备好业务容器配置并逐个启动业务容器
+	records := make([]store.ContainerRecord, 0, len(pod.Spec.Containers)+1)
+	records = append(records, startedRecords...)
 	containerStatuses := make([]corev1.ContainerStatus, 0, len(pod.Spec.Containers))
 	// 遍历每一个 container spec，创建对应的容器，并收集 record 和 status 信息
 	for _, containerSpec := range pod.Spec.Containers {
@@ -70,16 +82,16 @@ func (s *Service) Run(pod corev1.Pod) error {
 			ShareNetWith: infraID, // 共享 netns
 		})
 
-		// 如果中途某个 container 启动失败，Pod phase 会被写成 Failed，然后直接返回错误
+		// 如果中途某个容器启动失败，调用 rollback 清理该 pod
 		if err != nil {
-			status.Phase = "Failed"
-			_ = store.SavePodStatus(pod.Metadata.Name, status)
-			return fmt.Errorf("run container %q for pod %q: %w", containerSpec.Name, pod.Metadata.Name, err)
+			return rollback(fmt.Errorf("run container %q for pod %q: %w", containerSpec.Name, pod.Metadata.Name, err))
 		}
-		records = append(records, store.ContainerRecord{
+		record := store.ContainerRecord{
 			Name:        containerSpec.Name,
 			ContainerID: containerID,
-		})
+		}
+		records = append(records, record)
+		startedRecords = append(startedRecords, record)
 		containerStatuses = append(containerStatuses, corev1.ContainerStatus{
 			Name:        containerSpec.Name,
 			ContainerID: containerID,
@@ -106,7 +118,7 @@ func (s *Service) Get(name string) (corev1.Pod, error) {
 	if err != nil {
 		return corev1.Pod{}, err
 	}
-	status, err := store.LoadPodStatus(name)
+	status, err := s.refreshStatus(name)
 	if err != nil {
 		return corev1.Pod{}, err
 	}
@@ -117,7 +129,10 @@ func (s *Service) Get(name string) (corev1.Pod, error) {
 // 删除 Pod 中的每一个容器，最后删除 Pod 的有关信息
 func (s *Service) Delete(name string) error {
 	records, err := store.LoadContainerRecords(name)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return store.RemovePod(name)
+		}
 		return err
 	}
 	var infraRecords []store.ContainerRecord
@@ -127,19 +142,19 @@ func (s *Service) Delete(name string) error {
 			infraRecords = append(infraRecords, record)
 			continue
 		}
-		if err := s.runtime.StopContainer(record.ContainerID); err != nil {
+		if err := s.runtime.StopContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) {
 			return fmt.Errorf("stop container %q for pod %q: %w", record.ContainerID, name, err)
 		}
-		if err := s.runtime.RemoveContainer(record.ContainerID); err != nil {
+		if err := s.runtime.RemoveContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) {
 			return fmt.Errorf("remove container %q for pod %q: %w", record.ContainerID, name, err)
 		}
 	}
 	// 删 infra 容器 records
 	for _, record := range infraRecords {
-		if err := s.runtime.StopContainer(record.ContainerID); err != nil {
+		if err := s.runtime.StopContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) {
 			return fmt.Errorf("stop infra container %q for pod %q: %w", record.ContainerID, name, err)
 		}
-		if err := s.runtime.RemoveContainer(record.ContainerID); err != nil {
+		if err := s.runtime.RemoveContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) {
 			return fmt.Errorf("remove infra container %q for pod %q: %w", record.ContainerID, name, err)
 		}
 	}
@@ -188,6 +203,112 @@ func validatePod(pod corev1.Pod) error {
 		}
 	}
 	return nil
+}
+
+// 刷新状态
+func (s *Service) refreshStatus(name string) (corev1.PodStatus, error) {
+	status, err := store.LoadPodStatus(name)
+	if err != nil {
+		return corev1.PodStatus{}, err
+	}
+	records, err := store.LoadContainerRecords(name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return status, nil
+		}
+		return corev1.PodStatus{}, err
+	}
+
+	containerStatuses := make([]corev1.ContainerStatus, 0, len(records))
+	infraRunning := false
+	allBusinessRunning := true
+	allBusinessStopped := true
+
+	for _, record := range records {
+		// inspect 实时监控容器命令
+		info, err := s.runtime.InspectContainer(record.ContainerID)
+		currentPhase := "Stopped"
+		if err == nil {
+			statusText := strings.ToLower(info.Status)
+			if statusText == "running" {
+				currentPhase = "Running"
+			}
+			if record.Infra {
+				status.InfraContainerID = info.ID
+				status.PodIP = info.IP
+			}
+		} else if !isIgnorableRuntimeError(err) {
+			return corev1.PodStatus{}, err
+		}
+
+		if record.Infra {
+			infraRunning = currentPhase == "Running"
+			continue
+		}
+
+		containerStatuses = append(containerStatuses, corev1.ContainerStatus{
+			Name:        record.Name,
+			ContainerID: record.ContainerID,
+			Phase:       currentPhase,
+		})
+		if currentPhase == "Running" {
+			allBusinessStopped = false
+		} else {
+			allBusinessRunning = false
+		}
+	}
+
+	switch {
+	case infraRunning && allBusinessRunning:
+		status.Phase = "Running"
+	case !infraRunning && allBusinessStopped:
+		status.Phase = "Succeeded"
+	default:
+		status.Phase = "Failed"
+	}
+	status.ContainerStatuses = containerStatuses
+	if err := store.SavePodStatus(name, status); err != nil {
+		return corev1.PodStatus{}, err
+	}
+	return status, nil
+}
+
+// 按先 infra 后业务的顺序清理容器
+func cleanupRecords(records []store.ContainerRecord, runtime runtime.Runtime) error {
+	var firstErr error
+	var infraRecords []store.ContainerRecord
+	for _, record := range records {
+		if record.Infra {
+			infraRecords = append(infraRecords, record)
+			continue
+		}
+		if err := runtime.StopContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) && firstErr == nil {
+			firstErr = err
+		}
+		if err := runtime.RemoveContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, record := range infraRecords {
+		if err := runtime.StopContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) && firstErr == nil {
+			firstErr = err
+		}
+		if err := runtime.RemoveContainer(record.ContainerID); err != nil && !isIgnorableRuntimeError(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func isIgnorableRuntimeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "read metadata") ||
+		strings.Contains(message, "does not exist") ||
+		strings.Contains(message, "is not running") ||
+		strings.Contains(message, "is still running; stop it first")
 }
 
 // 自动生成 infra 容器 配置信息（理所当然不读 yaml，目前统一采用 busybox 中的 sleep 实现）
