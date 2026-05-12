@@ -9,7 +9,8 @@ type Pod struct {
 }
 
 type ObjectMeta struct {
-	Name string `json:"name" yaml:"name"`
+	Name   string            `json:"name" yaml:"name"`
+	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
 type PodSpec struct {

@@ -3,14 +3,20 @@ kind: ReplicaSet
 metadata:
     name: busybox-rs
 spec:
-    replicas: 2
-    template:
-        apiVersion: covetrol/v1
-        kind: Pod
-        metadata:
-            name: busybox
-        spec:
-            containers:
+  replicas: 2
+  selector:
+    app: busybox
+    rs: busybox-rs
+  template:
+    apiVersion: covetrol/v1
+    kind: Pod
+    metadata:
+      name: busybox
+      labels:
+        app: busybox
+        rs: busybox-rs
+    spec:
+      containers:
                 - name: main
                   image: busybox
                   command:

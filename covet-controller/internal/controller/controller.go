@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"maps"
 	"fmt"
 	"slices"
 	"sort"
@@ -53,8 +54,15 @@ func (c *Controller) Delete(name string) error {
 	if err != nil {
 		return err
 	}
-	for _, podName := range desiredPodNames(rs) {
-		_ = c.agent.DeletePod(podName)
+	actualPods, err := c.agent.ListPods()
+	if err != nil {
+		return err
+	}
+	for _, pod := range actualPods {
+		if !matchesReplicaSet(rs, pod) {
+			continue
+		}
+		_ = c.agent.DeletePod(pod.Metadata.Name)
 	}
 	return store.RemoveReplicaSet(name)
 }
@@ -74,6 +82,9 @@ func (c *Controller) Reconcile(name string) (appsv1.ReplicaSetStatus, error) {
 	// 创建一个运行中的 Pods 的 name -> pod struct 的映射
 	actualByName := make(map[string]corev1.Pod, len(actualPods))
 	for _, pod := range actualPods {
+		if !matchesReplicaSet(rs, pod) {
+			continue
+		}
 		actualByName[pod.Metadata.Name] = pod
 	}
 
@@ -88,6 +99,7 @@ func (c *Controller) Reconcile(name string) (appsv1.ReplicaSetStatus, error) {
 		podSpec.APIVersion = "covetrol/v1"
 		podSpec.Kind = "Pod"
 		podSpec.Metadata.Name = podName
+		podSpec.Metadata.Labels = mergeLabels(rs.Spec.Template.Metadata.Labels, rs.Spec.Selector)
 		// 应用配置创建 Pod
 		if err := c.agent.ApplyPod(podSpec); err != nil {
 			return appsv1.ReplicaSetStatus{}, fmt.Errorf("apply pod %q for replica set %q: %w", podName, name, err)
@@ -97,9 +109,6 @@ func (c *Controller) Reconcile(name string) (appsv1.ReplicaSetStatus, error) {
 	// 再遍历运行中的 Pods，如果一个 Pod 不在 desiredNames 里就删除多余的 Pod
 	// 这就是缩容，主要是针对一份配置文件的不同版本作调整，确保运行 Pod 和 desires 状态的一致性
 	for actualName := range actualByName {
-		if !strings.HasPrefix(actualName, name+"-") {
-			continue
-		}
 		if !slices.Contains(desiredNames, actualName) {
 			if err := c.agent.DeletePod(actualName); err != nil {
 				return appsv1.ReplicaSetStatus{}, fmt.Errorf("delete pod %q for replica set %q: %w", actualName, name, err)
@@ -119,7 +128,7 @@ func (c *Controller) Reconcile(name string) (appsv1.ReplicaSetStatus, error) {
 	}
 	// 检查此时 pod 状态是否和预期一致，准备写入 status.json
 	for _, pod := range refreshedPods {
-		if !slices.Contains(desiredNames, pod.Metadata.Name) {
+		if !matchesReplicaSet(rs, pod) || !slices.Contains(desiredNames, pod.Metadata.Name) {
 			continue
 		}
 		status.PodNames = append(status.PodNames, pod.Metadata.Name)
@@ -144,6 +153,9 @@ func validateReplicaSet(rs appsv1.ReplicaSet) error {
 	if rs.Spec.Replicas < 0 {
 		return fmt.Errorf("replica set replicas must be >= 0")
 	}
+	if len(rs.Spec.Selector) == 0 {
+		return fmt.Errorf("replica set spec.selector is required")
+	}
 	if len(rs.Spec.Template.Spec.Containers) == 0 {
 		return fmt.Errorf("replica set template.spec.containers is required")
 	}
@@ -157,5 +169,24 @@ func desiredPodNames(rs appsv1.ReplicaSet) []string {
 	for i := 0; i < rs.Spec.Replicas; i++ {
 		out = append(out, fmt.Sprintf("%s-%d", rs.Metadata.Name, i))
 	}
+	return out
+}
+
+func matchesReplicaSet(rs appsv1.ReplicaSet, pod corev1.Pod) bool {
+	for key, value := range rs.Spec.Selector {
+		if pod.Metadata.Labels == nil || pod.Metadata.Labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeLabels(base, extra map[string]string) map[string]string {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(extra))
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
 	return out
 }

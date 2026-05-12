@@ -11,8 +11,9 @@ type ReplicaSet struct {
 }
 
 type ReplicaSetSpec struct {
-	Replicas int        `json:"replicas" yaml:"replicas"`
-	Template corev1.Pod `json:"template" yaml:"template"`
+	Replicas int               `json:"replicas" yaml:"replicas"`
+	Selector map[string]string `json:"selector" yaml:"selector"`
+	Template corev1.Pod        `json:"template" yaml:"template"`
 }
 
 type ReplicaSetStatus struct {
