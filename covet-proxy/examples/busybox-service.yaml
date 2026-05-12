@@ -1,0 +1,10 @@
+apiVersion: covetrol/v1
+kind: Service
+metadata:
+  name: busybox-svc
+spec:
+  selector:
+    app: busybox
+    rs: busybox-rs
+  port: 18080
+  targetPort: 8080

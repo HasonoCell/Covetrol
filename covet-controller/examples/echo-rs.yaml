@@ -1,0 +1,29 @@
+apiVersion: covetrol/v1
+kind: ReplicaSet
+metadata:
+  name: echo-rs
+spec:
+  replicas: 2
+  selector:
+    app: echo
+    rs: echo-rs
+  template:
+    apiVersion: covetrol/v1
+    kind: Pod
+    metadata:
+      name: echo
+      labels:
+        app: echo
+        rs: echo-rs
+    spec:
+      containers:
+        - name: web
+          image: busybox
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              while true; do
+                printf 'HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\necho-ok' | /bin/busybox nc -l -p 8080
+              done

@@ -1,0 +1,10 @@
+apiVersion: covetrol/v1
+kind: Service
+metadata:
+  name: echo-svc
+spec:
+  selector:
+    app: echo
+    rs: echo-rs
+  port: 18080
+  targetPort: 8080
